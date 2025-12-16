@@ -254,8 +254,40 @@ function DungeonBoardEditorTrue3D() {
 
     // Geometries
     const wallHeight = 0.5 * 2; // altezza raddoppiata
+
+    const makeBeveledTile = () => {
+      const size = cellSize * 0.9; // lascia più spazio tra le celle
+      const half = size / 2;
+      const targetHeight = 0.14; // altezza originale del pavimento
+      const depth = 0.12;
+      const bevel = 0.04;
+      const shape = new THREE.Shape();
+      shape.moveTo(-half, -half);
+      shape.lineTo(half, -half);
+      shape.lineTo(half, half);
+      shape.lineTo(-half, half);
+      shape.lineTo(-half, -half);
+      const geo = new THREE.ExtrudeGeometry(shape, {
+        depth,
+        bevelEnabled: true,
+        bevelSegments: 2,
+        steps: 1,
+        bevelSize: bevel,
+        bevelThickness: bevel,
+      });
+      geo.rotateX(-Math.PI / 2);
+      geo.computeBoundingBox();
+      const h = (geo.boundingBox?.max.y ?? 0) - (geo.boundingBox?.min.y ?? 0) || 1;
+      geo.scale(1, targetHeight / h, 1);
+      geo.computeBoundingBox();
+      const box = geo.boundingBox!;
+      const centerY = (box.max.y + box.min.y) / 2;
+      geo.translate(0, targetHeight / 2 - centerY, 0);
+      return geo;
+    };
+
     const geo = {
-      tile: new THREE.BoxGeometry(cellSize * 0.96, 0.14, cellSize * 0.96),
+      tile: makeBeveledTile(),
       // Più segmenti per rendere l'ondulazione meno rigida
       water: new THREE.BoxGeometry(cellSize * 0.92, 0.08, cellSize * 0.92, 12, 1, 12),
       pitInner: new THREE.BoxGeometry(cellSize * 0.82, 0.22, cellSize * 0.82),
@@ -264,7 +296,8 @@ function DungeonBoardEditorTrue3D() {
       leverRod: new THREE.CylinderGeometry(0.03, 0.03, 0.18, 16),
       leverKnob: new THREE.SphereGeometry(0.05, 18, 18),
       trap: new THREE.BoxGeometry(0.45, 0.06, 0.45),
-      bridge: new THREE.BoxGeometry(0.72, 0.08, 0.22),
+      // Ponte più largo e lungo quanto la casella
+      bridge: new THREE.BoxGeometry(cellSize, 0.08, 0.44),
       torch: new THREE.BoxGeometry(0.08, 0.18, 0.08),
       flame: new THREE.SphereGeometry(0.06, 18, 18),
     } as const;
@@ -289,7 +322,7 @@ function DungeonBoardEditorTrue3D() {
     );
     base.rotation.x = -Math.PI / 2;
     base.position.set(0, -0.01, 0);
-    base.receiveShadow = true;
+    base.visible = false; // evita di vedere un piano grigio tra pavimento e baratro
     root.add(base);
 
     // Grid lines (visual separation between cells)
@@ -307,27 +340,19 @@ function DungeonBoardEditorTrue3D() {
     }
     root.add(grid);
 
-    // Tiles
+    // Tiles (skip pits here, handled later as merged regions)
+    const isPit = (x: number, y: number) => board.cells[idxCell(x, y)] === "pit";
+
     for (let y = 0; y < GRID_H; y++) {
       for (let x = 0; x < GRID_W; x++) {
         const i = idxCell(x, y);
         const type = board.cells[i];
+        if (type === "pit") continue;
         const cx = x * cellSize - halfW + cellSize / 2;
         const cz = y * cellSize - halfH + cellSize / 2;
 
-        if (type === "pit") {
-          // Baratro: la cella NON ha pavimento sopra. Creiamo un "pozzo" piu basso.
-          const pit = new THREE.Mesh(new THREE.BoxGeometry(cellSize, 0.34, cellSize), mats.pit);
-          pit.position.set(cx, -0.10, cz);
-          pit.castShadow = true;
-          pit.receiveShadow = true;
-          root.add(pit);
-          continue;
-        }
-
         if (type === "water") {
           // Acqua: la cella e piena d'acqua (niente pavimento sotto visibile).
-          // Un blocco unico piu chiaro, per essere leggibile anche in top-down.
           const w = new THREE.Mesh(geo.water, mats.water);
           w.position.set(cx, 0.05, cz);
           w.castShadow = true;
@@ -336,12 +361,99 @@ function DungeonBoardEditorTrue3D() {
           continue;
         }
 
-        const tile = new THREE.Mesh(geo.tile, mats.floor);
+        let tileMat = mats.floor;
+        if (floorMap) {
+          const matClone = mats.floor.clone();
+          const mapClone = floorMap.clone();
+          mapClone.offset.set(Math.random(), Math.random());
+          mapClone.needsUpdate = true;
+          matClone.map = mapClone;
+          tileMat = matClone;
+        }
+        const tile = new THREE.Mesh(geo.tile, tileMat);
         tile.position.set(cx, 0.07, cz);
         tile.castShadow = true;
         tile.receiveShadow = true;
         root.add(tile);
       }
+    }
+
+    // Merge pit regions into tapered frustums
+    const visited = Array(GRID_W * GRID_H).fill(false);
+    const pitHeight = 0.34;
+    const bottomTaper = 0.6; // base più stretta
+    const topInset = 0.92; // leggera incassatura visibile dall'alto
+    const topDrop = 0.015;
+
+    const neighbors = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ];
+
+    const pitRegions: { minX: number; maxX: number; minY: number; maxY: number }[] = [];
+
+    for (let y = 0; y < GRID_H; y++) {
+      for (let x = 0; x < GRID_W; x++) {
+        const idx = idxCell(x, y);
+        if (visited[idx] || !isPit(x, y)) continue;
+        // BFS to find contiguous pit region
+        let minX = x,
+          maxX = x,
+          minY = y,
+          maxY = y;
+        const queue: [number, number][] = [[x, y]];
+        visited[idx] = true;
+        while (queue.length) {
+          const [cx, cy] = queue.shift()!;
+          for (const [dx, dy] of neighbors) {
+            const nx = cx + dx;
+            const ny = cy + dy;
+            if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H) continue;
+            const nIdx = idxCell(nx, ny);
+            if (visited[nIdx] || !isPit(nx, ny)) continue;
+            visited[nIdx] = true;
+            queue.push([nx, ny]);
+            minX = Math.min(minX, nx);
+            maxX = Math.max(maxX, nx);
+            minY = Math.min(minY, ny);
+            maxY = Math.max(maxY, ny);
+          }
+        }
+        pitRegions.push({ minX, maxX, minY, maxY });
+      }
+    }
+
+    for (const region of pitRegions) {
+      const wCells = region.maxX - region.minX + 1;
+      const hCells = region.maxY - region.minY + 1;
+      const width = wCells * cellSize;
+      const depth = hCells * cellSize;
+      const geom = new THREE.BoxGeometry(width, pitHeight, depth, 1, 1, 1);
+      const pos = geom.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < pos.count; i++) {
+        const y = pos.getY(i);
+        const x = pos.getX(i);
+        const z = pos.getZ(i);
+        if (y < 0) {
+          pos.setX(i, x * bottomTaper);
+          pos.setZ(i, z * bottomTaper);
+        } else if (y > 0) {
+          pos.setX(i, x * topInset);
+          pos.setZ(i, z * topInset);
+          pos.setY(i, y - topDrop);
+        }
+      }
+      pos.needsUpdate = true;
+      geom.computeVertexNormals();
+      const pit = new THREE.Mesh(geom, mats.pit);
+      const centerX = (region.minX + region.maxX + 1) * 0.5 * cellSize - halfW;
+      const centerZ = (region.minY + region.maxY + 1) * 0.5 * cellSize - halfH;
+      pit.position.set(centerX, -pitHeight / 2, centerZ);
+      pit.castShadow = true;
+      pit.receiveShadow = true;
+      root.add(pit);
     }
 
     const buildDoor = () => {
@@ -722,6 +834,7 @@ function DungeonBoardEditorTrue3D() {
 
   // Click -> pick
   function pickFromMouse(ev: React.MouseEvent) {
+    if (ev.button !== 0) return; // solo click sinistro per piazzare
     const renderer = rendererRef.current;
     const scene = sceneRef.current;
     const camera = cameraRef.current;
@@ -1210,6 +1323,7 @@ function DungeonBoardEditorTrue3D() {
             onMouseUp={(e) => {
               pickFromMouse(e as any);
             }}
+            onContextMenu={(e) => e.preventDefault()}
             style={{ width: "100%", height: "100%", cursor: "crosshair" }}
           />
         </div>
