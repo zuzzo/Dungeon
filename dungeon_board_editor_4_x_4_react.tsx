@@ -238,7 +238,7 @@ function DungeonBoardEditorTrue3D() {
           : { color: 0xffffff, roughness: 1.0, metalness: 0.0 }
       ),
       wall: new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.85, metalness: 0.0 }),
-      door: new THREE.MeshStandardMaterial({ color: 0x6b3f09, roughness: 0.75, metalness: 0.0 }),
+      door: new THREE.MeshStandardMaterial({ color: 0x8b572a, roughness: 0.65, metalness: 0.05 }),
       bridge: new THREE.MeshStandardMaterial({ color: 0x6b3f09, roughness: 0.85, metalness: 0.0 }),
       lever: new THREE.MeshStandardMaterial({ color: 0x303030, roughness: 0.6, metalness: 0.05 }),
       trapdoor: new THREE.MeshStandardMaterial({ color: 0x2b2b2b, roughness: 0.9, metalness: 0.0 }),
@@ -253,13 +253,14 @@ function DungeonBoardEditorTrue3D() {
     } as const;
 
     // Geometries
+    const wallHeight = 0.5 * 2; // altezza raddoppiata
     const geo = {
       tile: new THREE.BoxGeometry(cellSize * 0.96, 0.14, cellSize * 0.96),
       // Più segmenti per rendere l'ondulazione meno rigida
       water: new THREE.BoxGeometry(cellSize * 0.92, 0.08, cellSize * 0.92, 12, 1, 12),
       pitInner: new THREE.BoxGeometry(cellSize * 0.82, 0.22, cellSize * 0.82),
-      hedge: new THREE.BoxGeometry(cellSize, 0.35, 0.07),
-      vedge: new THREE.BoxGeometry(0.07, 0.35, cellSize),
+      hedge: new THREE.BoxGeometry(cellSize, wallHeight, 0.14), // spessore raddoppiato
+      vedge: new THREE.BoxGeometry(0.14, wallHeight, cellSize), // spessore raddoppiato
       leverRod: new THREE.CylinderGeometry(0.03, 0.03, 0.18, 16),
       leverKnob: new THREE.SphereGeometry(0.05, 18, 18),
       trap: new THREE.BoxGeometry(0.45, 0.06, 0.45),
@@ -343,6 +344,36 @@ function DungeonBoardEditorTrue3D() {
       }
     }
 
+    const buildDoor = () => {
+      const gap = cellSize / 5; // luce dell'apertura
+      const postThickness = (cellSize - gap) / 2;
+      const depth = 0.16; // spessore raddoppiato
+      const lintelHeight = 0.24; // altezza architrave raddoppiata
+      const width = cellSize;
+
+      const g = new THREE.Group();
+      const postGeo = new THREE.BoxGeometry(postThickness, wallHeight, depth);
+      const lintelGeo = new THREE.BoxGeometry(width - postThickness * 2, lintelHeight, depth);
+
+      const p1 = new THREE.Mesh(postGeo, mats.door);
+      p1.position.set(-width / 2 + postThickness / 2, wallHeight / 2, 0);
+      p1.castShadow = true;
+      p1.receiveShadow = true;
+
+      const p2 = p1.clone();
+      p2.position.set(width / 2 - postThickness / 2, wallHeight / 2, 0);
+
+      const lintel = new THREE.Mesh(lintelGeo, mats.door);
+      lintel.position.set(0, wallHeight - lintelHeight / 2, 0);
+      lintel.castShadow = true;
+      lintel.receiveShadow = true;
+
+      g.add(p1, p2, lintel);
+      return g;
+    };
+
+    const doorTemplate = buildDoor();
+
     // Edges: horizontal
     for (let y = 0; y < GRID_H + 1; y++) {
       for (let x = 0; x < GRID_W; x++) {
@@ -350,12 +381,17 @@ function DungeonBoardEditorTrue3D() {
         if (e === "none") continue;
         const cx = x * cellSize - halfW + cellSize / 2;
         const cz = y * cellSize - halfH;
-        const m = e === "wall" ? mats.wall : mats.door;
-        const mesh = new THREE.Mesh(geo.hedge, m);
-        mesh.position.set(cx, 0.35 / 2, cz);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        root.add(mesh);
+        if (e === "wall") {
+          const mesh = new THREE.Mesh(geo.hedge, mats.wall);
+          mesh.position.set(cx, wallHeight / 2, cz);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          root.add(mesh);
+        } else {
+          const door = doorTemplate.clone();
+          door.position.set(cx, 0, cz);
+          root.add(door);
+        }
       }
     }
 
@@ -366,12 +402,18 @@ function DungeonBoardEditorTrue3D() {
         if (e === "none") continue;
         const cx = x * cellSize - halfW;
         const cz = y * cellSize - halfH + cellSize / 2;
-        const m = e === "wall" ? mats.wall : mats.door;
-        const mesh = new THREE.Mesh(geo.vedge, m);
-        mesh.position.set(cx, 0.35 / 2, cz);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        root.add(mesh);
+        if (e === "wall") {
+          const mesh = new THREE.Mesh(geo.vedge, mats.wall);
+          mesh.position.set(cx, wallHeight / 2, cz);
+          mesh.castShadow = true;
+          mesh.receiveShadow = true;
+          root.add(mesh);
+        } else {
+          const door = doorTemplate.clone();
+          door.position.set(cx, 0, cz);
+          door.rotation.y = Math.PI / 2;
+          root.add(door);
+        }
       }
     }
 
