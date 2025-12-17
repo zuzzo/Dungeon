@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dungeon Board Editor 4x4 - Three.js</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        overflow: hidden;
+      }
+      body {
+        margin: 0;
+        font-family: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: #f5f5f5;
+      }
+      .app-shell {
+        display: grid;
+        grid-template-columns: 340px 1fr;
+        gap: 12px;
+        height: 100vh;
+        padding: 12px;
+        box-sizing: border-box;
+      }
+      .panel {
+        background: #fff;
+        border: 1px solid #e5e7eb;
+        border-radius: 14px;
+        padding: 12px;
+        overflow: hidden;
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.05);
+      }
+      .panel-scroll {
+        overflow-y: auto;
+        height: 100%;
+      }
+      .stack {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .section-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #111827;
+        margin-bottom: 6px;
+      }
+      .btn {
+        border: 1px solid #d1d5db;
+        border-radius: 10px;
+        padding: 6px 10px;
+        background: #fff;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .btn.active {
+        background: #111827;
+        color: #fff;
+        border-color: #111827;
+      }
+      .controls-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+        gap: 6px;
+      }
+      .viewport-wrap {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        gap: 10px;
+      }
+      .viewport {
+        flex: 1;
+        min-height: 420px;
+        border-radius: 12px;
+        border: 1px solid #e5e7eb;
+        overflow: hidden;
+        background: #fff;
+      }
+      .hint {
+        font-size: 12px;
+        color: #6b7280;
+      }
+      .footer-note {
+        font-size: 11px;
+        color: #6b7280;
+      }
+      input[type="range"] {
+        width: 100%;
+      }
+      label.text-xs {
+        font-size: 12px;
+        color: #111827;
+      }
+      .small {
+        font-size: 12px;
+        color: #374151;
+      }
+    </style>
+    <script src="./libs/react.development.js"></script>
+    <script src="./libs/react-dom.development.js"></script>
+    <script src="./libs/three.min.js"></script>
+    <script src="https://unpkg.com/three@0.157.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="./libs/babel.min.js"></script>
+    <script type="text/babel" data-presets="typescript,react" src="./dungeon_board_editor_4_x_4_react.tsx"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>
