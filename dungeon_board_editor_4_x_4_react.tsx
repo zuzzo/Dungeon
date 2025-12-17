@@ -21,7 +21,7 @@ const GRID_H = 4;
 
 type CellType = "floor" | "pit" | "water";
 type EdgeType = "none" | "wall" | "door";
-type ObjType = "none" | "lever" | "trapdoor" | "torch" | "bridge" | "light";
+type ObjType = "none" | "lever" | "trapdoor" | "torch" | "bridge" | "light" | "custom";
 
 type ToolMode = "cells" | "edges" | "objects";
 
@@ -106,6 +106,9 @@ function DungeonBoardEditorTrue3D() {
   const [torchIntensity, setTorchIntensity] = useState(7.5);
   const [torchDistance, setTorchDistance] = useState(3.2);
   const [torchDecay, setTorchDecay] = useState(2.0);
+  const [customModelUrl, setCustomModelUrl] = useState<string | null>(null);
+  const [customModelName, setCustomModelName] = useState<string | null>(null);
+  const [customStatus, setCustomStatus] = useState<string>("");
 
   const [texFloorUrl, setTexFloorUrl] = useState<string | null>(null);
   const [texWaterUrl, setTexWaterUrl] = useState<string | null>(null);
@@ -126,6 +129,8 @@ function DungeonBoardEditorTrue3D() {
   const texCacheRef = useRef<Record<string, THREE.Texture>>({});
   const waterUniformsRef = useRef<{ time: { value: number } }>({ time: { value: 0 } });
   const clockRef = useRef(new THREE.Clock());
+  const customModelRef = useRef<THREE.Group | null>(null);
+  const customModelInfoRef = useRef<{ bbox: THREE.Box3; scale: number; center: THREE.Vector3 } | null>(null);
 
   // A simple orbit-like camera controller (mouse drag rotates around origin)
   const orbitRef = useRef({
@@ -151,9 +156,36 @@ function DungeonBoardEditorTrue3D() {
     if (url.startsWith("blob:")) URL.revokeObjectURL(url);
   }
 
+  function disposeModel() {
+    const src = customModelRef.current;
+    if (!src) return;
+    src.traverse((n: any) => {
+      if (n.isMesh) {
+        if (n.geometry) n.geometry.dispose();
+        if (n.material) {
+          const mats = Array.isArray(n.material) ? n.material : [n.material];
+          mats.forEach((m) => {
+            if (m.map) m.map.dispose();
+            if (m.dispose) m.dispose();
+          });
+        }
+      }
+    });
+    customModelRef.current = null;
+    customModelInfoRef.current = null;
+  }
+
   function clearUrl(current: string | null, setter: (url: string | null) => void) {
     releaseTexture(current);
     setter(null);
+  }
+
+  function clearCustomModel() {
+    if (customModelUrl && customModelUrl.startsWith("blob:")) URL.revokeObjectURL(customModelUrl);
+    disposeModel();
+    setCustomModelUrl(null);
+    setCustomModelName(null);
+    setCustomStatus("Modello rimosso");
   }
 
   function setFromFile(setter: (url: string | null) => void) {
@@ -167,6 +199,72 @@ function DungeonBoardEditorTrue3D() {
       });
       ev.target.value = "";
     };
+  }
+
+  function loadCustomModel(ev: React.ChangeEvent<HTMLInputElement>) {
+    const file = ev.target.files?.[0];
+    if (!file) return;
+    const loader: any = (THREE as any).GLTFLoader ? new (THREE as any).GLTFLoader() : null;
+    if (!loader) {
+      setCustomStatus("GLTFLoader non disponibile.");
+      ev.target.value = "";
+      return;
+    }
+
+    const url = URL.createObjectURL(file);
+    setCustomStatus("Caricamento modello...");
+
+    loader.load(
+      url,
+      (gltf: any) => {
+        disposeModel();
+        const scene: THREE.Group = gltf.scene || gltf.scenes?.[0];
+        if (!scene) {
+          setCustomStatus("Modello vuoto.");
+          URL.revokeObjectURL(url);
+          ev.target.value = "";
+          return;
+        }
+        // prepara per ombre e texture
+        scene.traverse((n: any) => {
+          if (n.isMesh) {
+            n.castShadow = true;
+            n.receiveShadow = true;
+            const mats = Array.isArray(n.material) ? n.material : [n.material];
+            mats.forEach((m: any) => {
+              if (m.map) {
+                m.map.anisotropy = 4;
+                m.map.colorSpace = THREE.SRGBColorSpace;
+              }
+            });
+          }
+        });
+        const bbox = new THREE.Box3().setFromObject(scene);
+        if (bbox.isEmpty()) bbox.setFromCenterAndSize(new THREE.Vector3(0, 0, 0), new THREE.Vector3(1, 1, 1));
+        const size = new THREE.Vector3();
+        bbox.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z) || 1;
+        const target = cellSize * 0.7;
+        const scale = target / maxDim;
+        const center = new THREE.Vector3();
+        bbox.getCenter(center);
+
+        customModelRef.current = scene;
+        customModelInfoRef.current = { bbox, scale, center };
+        if (customModelUrl && customModelUrl.startsWith("blob:")) URL.revokeObjectURL(customModelUrl);
+        setCustomModelUrl(url);
+        setCustomModelName(file.name);
+        setCustomStatus("Modello caricato");
+      },
+      undefined,
+      (err: any) => {
+        console.error(err);
+        setCustomStatus("Errore nel caricare il modello.");
+        URL.revokeObjectURL(url);
+      }
+    );
+
+    ev.target.value = "";
   }
 
   // Build / rebuild scene graph when board or lighting changes
@@ -533,6 +631,8 @@ function DungeonBoardEditorTrue3D() {
     const torchLightColor = toThreeColor(torchColor);
     let hasTorch = false;
     let hasLight = false;
+    const customSrc = customModelRef.current;
+    const customInfo = customModelInfoRef.current;
 
     for (let y = 0; y < GRID_H; y++) {
       for (let x = 0; x < GRID_W; x++) {
@@ -604,11 +704,31 @@ function DungeonBoardEditorTrue3D() {
           root.add(l);
           continue;
         }
+
+        if (obj.type === "custom" && customSrc) {
+          const inst = customSrc.clone(true);
+          inst.traverse((n: any) => {
+            if (n.isMesh) {
+              n.castShadow = true;
+              n.receiveShadow = true;
+            }
+          });
+          if (customInfo) {
+            inst.scale.setScalar(customInfo.scale);
+            const yOffset = -customInfo.bbox.min.y * customInfo.scale;
+            inst.position.set(cx - customInfo.center.x * customInfo.scale, yOffset, cz - customInfo.center.z * customInfo.scale);
+          } else {
+            inst.position.set(cx, 0, cz);
+          }
+          inst.rotation.y = rot;
+          root.add(inst);
+          continue;
+        }
       }
     }
 
     return { root, pickPlane, hasTorch, hasLight };
-  }, [board, halfH, halfW, torchColor, torchDecay, torchDistance, torchIntensity, texFloorUrl, texWaterUrl, texPitUrl, texRepeat, waterOpacity]);
+  }, [board, halfH, halfW, torchColor, torchDecay, torchDistance, torchIntensity, texFloorUrl, texWaterUrl, texPitUrl, texRepeat, waterOpacity, customModelUrl]);
 
   // Initialize renderer + scene once
   useEffect(() => {
@@ -786,8 +906,10 @@ function DungeonBoardEditorTrue3D() {
     return () => {
       Object.values(texCacheRef.current).forEach((tex) => tex.dispose());
       texCacheRef.current = {};
+      disposeModel();
+      if (customModelUrl && customModelUrl.startsWith("blob:")) URL.revokeObjectURL(customModelUrl);
     };
-  }, []);
+  }, [customModelUrl]);
 
   // Rebuild scene content when board changes
   useEffect(() => {
@@ -936,6 +1058,12 @@ function DungeonBoardEditorTrue3D() {
               setTimeout(() => setStatus(""), 1400);
               return prev;
             }
+          }
+
+          if (objectBrush === "custom" && !customModelRef.current) {
+            setStatus("Carica prima un modello GLB/GLTF in \"Oggetti esterni\".");
+            setTimeout(() => setStatus(""), 1400);
+            return prev;
           }
 
           if (objectBrush === "none") {
@@ -1109,9 +1237,19 @@ function DungeonBoardEditorTrue3D() {
               <div>
                 <div className="section-title">Pennello oggetto</div>
                 <div className="controls-grid">
-                  {(["lever", "trapdoor", "torch", "bridge", "light"] as const).map((t) => (
+                  {(["lever", "trapdoor", "torch", "bridge", "light", "custom"] as const).map((t) => (
                     <button key={t} className={`btn ${objectBrush === t ? "active" : ""}`} onClick={() => setObjectBrush(t)}>
-                      {t === "lever" ? "Leva" : t === "trapdoor" ? "Botola" : t === "torch" ? "Torcia" : t === "bridge" ? "Ponte" : "Luce"}
+                      {t === "lever"
+                        ? "Leva"
+                        : t === "trapdoor"
+                        ? "Botola"
+                        : t === "torch"
+                        ? "Torcia"
+                        : t === "bridge"
+                        ? "Ponte"
+                        : t === "light"
+                        ? "Luce"
+                        : "Modello"}
                     </button>
                   ))}
                   <button className={`btn ${objectBrush === "none" ? "active" : ""}`} onClick={() => setObjectBrush("none")}>
@@ -1119,6 +1257,23 @@ function DungeonBoardEditorTrue3D() {
                   </button>
                 </div>
                 <div className="hint">Regola: il ponte si puo piazzare solo su Acqua o Baratro. Riclic per ruotare. Le luci sono solo punti luce.</div>
+                <div className="card-section">
+                  <div className="section-title">Oggetti esterni (GLB/GLTF)</div>
+                  <div className="small">Carica un modello completo di texture; si adatta alla cella.</div>
+                  <div className="stack" style={{ marginTop: 6 }}>
+                    <input type="file" accept=".glb,.gltf" onChange={loadCustomModel} />
+                    <div className="flex gap-6">
+                      <button className="btn tight" onClick={clearCustomModel}>
+                        Rimuovi modello
+                      </button>
+                      <button className="btn tight" onClick={() => setObjectBrush("custom")}>
+                        Seleziona brush Modello
+                      </button>
+                    </div>
+                    <div className="small break-all">{customModelName ?? "-"}</div>
+                    {customStatus && <div className="hint">{customStatus}</div>}
+                  </div>
+                </div>
               </div>
             )}
 
