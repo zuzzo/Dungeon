@@ -27,7 +27,7 @@ type ToolMode = "cells" | "edges" | "objects";
 
 type LightProps = { color: string; intensity: number; distance: number; decay: number };
 type ObjectPlacement = { type: ObjType; rotation: 0 | 90 | 180 | 270; light?: LightProps };
-type CustomPlacement = { id: number; name: string; url: string; x: number; y: number; scale: number };
+type CustomPlacement = { id: number; name: string; url: string; x: number; y: number; scale: number; yOffset: number; rotation: number };
 
 type BoardState = {
   cells: CellType[];
@@ -129,6 +129,7 @@ function DungeonBoardEditorTrue3D() {
   const [customTemplates, setCustomTemplates] = useState<Record<string, THREE.Object3D>>({});
   const [customBrush, setCustomBrush] = useState<string | null>(null);
   const [customObjects, setCustomObjects] = useState<CustomPlacement[]>([]);
+  const [selectedCustomId, setSelectedCustomId] = useState<number | null>(null);
   const nextCustomIdRef = useRef(1);
 
   // ---- Three refs ----
@@ -149,6 +150,7 @@ function DungeonBoardEditorTrue3D() {
     mode: "move",
     lastY: 0,
   });
+  const importJsonRef = useRef<HTMLInputElement | null>(null);
 
   // A simple orbit-like camera controller (mouse drag rotates around origin)
   const orbitRef = useRef({
@@ -201,15 +203,18 @@ function DungeonBoardEditorTrue3D() {
   }, []);
 
   function loadCustomGlb(file: File) {
-    const loader = gltfLoaderRef.current || (window as any).THREE?.GLTFLoader || (window as any).GLTFLoader;
+    const LoaderClass = (window as any).THREE?.GLTFLoader || (window as any).GLTFLoader;
+    let loader: any = gltfLoaderRef.current;
+    if (!loader && LoaderClass) loader = new LoaderClass();
     if (!loader) {
+      console.error("GLTFLoader non trovato: assicurati che lo script sia caricato.");
       setStatus("GLTFLoader non disponibile.");
       setTimeout(() => setStatus(""), 1200);
       return;
     }
-    const instance = loader instanceof Function ? loader : new (loader as any)();
+    gltfLoaderRef.current = loader;
     const url = URL.createObjectURL(file);
-    instance.load(
+    loader.load(
       url,
       (gltf: any) => {
         const src = gltf.scene || gltf.scenes?.[0];
@@ -225,8 +230,11 @@ function DungeonBoardEditorTrue3D() {
         const maxSize = Math.max(size.x, size.y, size.z) || 1;
         const target = 0.8; // fit inside cell
         const scale = target / maxSize;
+        // Pivot al centro: porta il bounding box al centro
         scene.position.sub(center);
         scene.scale.setScalar(scale);
+        // Salva mezza altezza per appoggio a terra in fase di istanza
+        (scene as any).userData.halfHeight = (size.y * scale) / 2;
 
         scene.traverse((n: any) => {
           if (n.isMesh) {
@@ -243,7 +251,8 @@ function DungeonBoardEditorTrue3D() {
         setTimeout(() => setStatus(""), 1200);
       },
       undefined,
-      () => {
+      (err: any) => {
+        console.error("Errore GLB", err);
         setStatus(`Errore nel caricare ${file.name}`);
         setTimeout(() => setStatus(""), 1200);
       }
@@ -625,8 +634,10 @@ function DungeonBoardEditorTrue3D() {
           n.receiveShadow = true;
         }
       });
-      inst.position.set(c.x * cellSize - halfW + cellSize / 2, 0.18, c.y * cellSize - halfH + cellSize / 2);
+      const halfHgt = (tpl as any).userData?.halfHeight ?? 0;
+      inst.position.set(c.x * cellSize - halfW + cellSize / 2, halfHgt + 0.02 + c.yOffset, c.y * cellSize - halfH + cellSize / 2);
       inst.scale.setScalar(c.scale);
+      inst.rotation.y = (c.rotation * Math.PI) / 180;
       inst.name = `custom-${c.id}`;
       customMeshRef.current[c.id] = inst;
       customRoot.add(inst);
@@ -712,7 +723,7 @@ function DungeonBoardEditorTrue3D() {
 
     root.add(customRoot);
 
-    return { root, pickPlane, hasTorch, hasLight };
+    return { root, pickPlane, hasTorch, hasLight, customRoot };
   }, [board, halfH, halfW, torchColor, torchDecay, torchDistance, torchIntensity, texFloorUrl, texWaterUrl, texPitUrl, texRepeat, waterOpacity, customObjects, customTemplates]);
 
   // Initialize renderer + scene once
@@ -1029,6 +1040,7 @@ function DungeonBoardEditorTrue3D() {
     const target = [...customObjects].reverse().find((c) => c.x === cell.x && c.y === cell.y);
     if (!target) return;
     dragStateRef.current = { id: target.id, mode: ev.altKey ? "scale" : "move", lastY: ev.clientY };
+    setSelectedCustomId(target.id);
     ev.preventDefault();
   }
 
@@ -1038,17 +1050,11 @@ function DungeonBoardEditorTrue3D() {
     if (st.mode === "move") {
       const cell = getCellFromMouse(ev);
       if (!cell) return;
-      setCustomObjects((prev) =>
-        prev.map((c) => (c.id === st.id ? { ...c, x: cell.x, y: cell.y } : c))
-      );
+      setCustomObjects((prev) => prev.map((c) => (c.id === st.id ? { ...c, x: cell.x, y: cell.y } : c)));
     } else {
       const dy = (st.lastY - ev.clientY) * 0.01;
       st.lastY = ev.clientY;
-      setCustomObjects((prev) =>
-        prev.map((c) =>
-          c.id === st.id ? { ...c, scale: clamp(c.scale + dy, 0.3, 3) } : c
-        )
-      );
+      setCustomObjects((prev) => prev.map((c) => (c.id === st.id ? { ...c, scale: clamp(c.scale + dy, 0.3, 3) } : c)));
     }
   }
 
@@ -1058,23 +1064,33 @@ function DungeonBoardEditorTrue3D() {
     }
   }
 
-function applyPick(pick: Pick) {
-    // Placement for custom GLB objects (left click)
-    if (mode === "objects" && customBrush && pick.kind === "cell") {
+  function updateSelectedCustom(partial: Partial<Pick<CustomPlacement, "scale" | "yOffset" | "rotation">>) {
+    if (selectedCustomId === null) return;
+    setCustomObjects((prev) =>
+      prev.map((c) => (c.id === selectedCustomId ? { ...c, ...partial } : c))
+    );
+  }
+
+  function applyPick(pick: Pick) {
+    // Placement / erase for custom GLB objects (when brush is custom + gomma attiva)
+    if (mode === "objects" && pick.kind === "cell" && customBrush && objectBrush === "none") {
       if (!customTemplates[customBrush]) {
         setStatus("Carica un oggetto prima di piazzarlo.");
         setTimeout(() => setStatus(""), 1200);
         return;
       }
       setCustomObjects((prev) => {
-        const existingIdx = prev.findIndex((c) => c.x === pick.x && c.y === pick.y && c.name === customBrush);
+        const existingIdx = prev.findIndex((c) => c.x === pick.x && c.y === pick.y);
         if (existingIdx >= 0) {
           const copy = [...prev];
-          copy[existingIdx] = { ...copy[existingIdx], x: pick.x, y: pick.y };
+          const removed = copy.splice(existingIdx, 1)[0];
+          if (removed && removed.id === selectedCustomId) setSelectedCustomId(null);
           return copy;
         }
         const id = nextCustomIdRef.current++;
-        return [...prev, { id, name: customBrush, url: customBrush, x: pick.x, y: pick.y, scale: 1 }];
+        const created: CustomPlacement = { id, name: customBrush, url: customBrush, x: pick.x, y: pick.y, scale: 1, yOffset: 0, rotation: 0 };
+        setSelectedCustomId(id);
+        return [...prev, created];
       });
       return;
     }
@@ -1102,6 +1118,8 @@ function applyPick(pick: Pick) {
           return next;
         }
         if (mode === "objects") {
+          // reset custom selection if we draw base objects
+          setSelectedCustomId(null);
           if (objectBrush === "light") {
             const prevLight = next.objects[i];
             next.objects[i] = {
@@ -1170,6 +1188,80 @@ function applyPick(pick: Pick) {
     setBoard(makeEmptyState());
     setStatus("Reset completato.");
     setTimeout(() => setStatus(""), 1200);
+  }
+
+  function exportJson() {
+    const payload = {
+      version: 1,
+      board,
+      customObjects,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "dungeon_4x4.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function importJson(file: File) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const text = reader.result as string;
+        const data = JSON.parse(text);
+        if (!data || typeof data !== "object") throw new Error("Formato invalido");
+        if (!data.board || !data.board.cells || !data.board.hEdges || !data.board.vEdges || !data.board.objects) {
+          throw new Error("Board mancante");
+        }
+        const nextBoard: BoardState = {
+          cells: Array.isArray(data.board.cells) && data.board.cells.length === GRID_W * GRID_H ? data.board.cells : makeEmptyState().cells,
+          hEdges:
+            Array.isArray(data.board.hEdges) && data.board.hEdges.length === (GRID_H + 1) * GRID_W
+              ? data.board.hEdges
+              : makeEmptyState().hEdges,
+          vEdges:
+            Array.isArray(data.board.vEdges) && data.board.vEdges.length === GRID_H * (GRID_W + 1)
+              ? data.board.vEdges
+              : makeEmptyState().vEdges,
+          objects:
+            Array.isArray(data.board.objects) && data.board.objects.length === GRID_W * GRID_H
+              ? data.board.objects
+              : makeEmptyState().objects,
+        };
+        setBoard(nextBoard);
+
+        if (Array.isArray(data.customObjects)) {
+          setCustomObjects(
+            data.customObjects
+              .filter((c: any) => typeof c?.name === "string" && typeof c?.x === "number" && typeof c?.y === "number")
+              .map((c: any) => ({
+                id: typeof c.id === "number" ? c.id : nextCustomIdRef.current++,
+                name: c.name,
+                url: c.url ?? c.name,
+                x: clamp(c.x, 0, GRID_W - 1),
+                y: clamp(c.y, 0, GRID_H - 1),
+                scale: typeof c.scale === "number" ? clamp(c.scale, 0.3, 3) : 1,
+                yOffset: typeof c.yOffset === "number" ? clamp(c.yOffset, -1, 3) : 0,
+                rotation: typeof c.rotation === "number" ? c.rotation : 0,
+              }))
+          );
+        }
+        setSelectedLightCell(null);
+        setEditingLight(null);
+        setSelectedCustomId(null);
+        setStatus("Dungeon caricato.");
+        setTimeout(() => setStatus(""), 1200);
+      } catch (err) {
+        console.error(err);
+        setStatus("Errore nel caricare il JSON.");
+        setTimeout(() => setStatus(""), 1500);
+      }
+    };
+    reader.readAsText(file);
   }
 
   function exportPng() {
@@ -1495,6 +1587,61 @@ function applyPick(pick: Pick) {
                   </div>
                 </div>
               )}
+              {customObjects.length > 0 && (
+                <div>
+                  <div className="section-title" style={{ marginTop: 8 }}>
+                    Oggetti piazzati
+                  </div>
+                  <div className="stack">
+                    {customObjects.map((c) => (
+                      <button
+                        key={c.id}
+                        className={`btn ${selectedCustomId === c.id ? "active" : ""}`}
+                        onClick={() => setSelectedCustomId(c.id)}
+                      >
+                        {c.name} ({c.x + 1},{c.y + 1})
+                      </button>
+                    ))}
+                  </div>
+                  {selectedCustomId !== null && (
+                    <div className="controls-grid" style={{ marginTop: 6 }}>
+                      <label className="text-xs">
+                        <div className="section-title">Scala</div>
+                        <input
+                          type="range"
+                          min={0.3}
+                          max={3}
+                          step={0.05}
+                          value={customObjects.find((c) => c.id === selectedCustomId)?.scale ?? 1}
+                          onChange={(e) => updateSelectedCustom({ scale: Number(e.target.value) })}
+                        />
+                      </label>
+                      <label className="text-xs">
+                        <div className="section-title">Altezza (y)</div>
+                        <input
+                          type="range"
+                          min={-1}
+                          max={3}
+                          step={0.02}
+                          value={customObjects.find((c) => c.id === selectedCustomId)?.yOffset ?? 0}
+                          onChange={(e) => updateSelectedCustom({ yOffset: Number(e.target.value) })}
+                        />
+                      </label>
+                      <label className="text-xs">
+                        <div className="section-title">Rotazione (gradi)</div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={359}
+                          step={1}
+                          value={customObjects.find((c) => c.id === selectedCustomId)?.rotation ?? 0}
+                          onChange={(e) => updateSelectedCustom({ rotation: Number(e.target.value) })}
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="controls-grid">
                 <label className="text-xs">
                   <div className="section-title">Torcia: intensita (solo fiamma visiva)</div>
@@ -1517,6 +1664,23 @@ function applyPick(pick: Pick) {
                 <button className="btn active" onClick={exportPng}>
                   PNG (print)
                 </button>
+                <button className="btn" onClick={exportJson}>
+                  Salva dungeon (JSON)
+                </button>
+                <button className="btn" onClick={() => importJsonRef.current?.click()}>
+                  Carica dungeon
+                </button>
+                <input
+                  ref={importJsonRef as any}
+                  type="file"
+                  accept="application/json"
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) importJson(file);
+                    e.target.value = "";
+                  }}
+                />
                 <button className="btn" onClick={resetAll}>
                   Reset
                 </button>
