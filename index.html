@@ -97,6 +97,49 @@
         font-size: 12px;
         color: #374151;
       }
+      /* Tree / tabs */
+      .tab-strip {
+        display: flex;
+        gap: 6px;
+        border-bottom: 1px solid #e5e7eb;
+        padding-bottom: 6px;
+        margin-bottom: 8px;
+      }
+      .tab {
+        padding: 6px 10px;
+        border: 1px solid #d1d5db;
+        border-bottom: none;
+        border-radius: 10px 10px 0 0;
+        background: #f9fafb;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .tab.active {
+        background: #111827;
+        color: #fff;
+        border-color: #111827;
+      }
+      .tree {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .tree-node {
+        border-left: 2px solid #e5e7eb;
+        padding-left: 10px;
+        margin-left: 4px;
+      }
+      .tree-label {
+        font-weight: 600;
+        font-size: 12px;
+        color: #111827;
+        margin-bottom: 4px;
+      }
+      .tree-children {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
     </style>
     <script src="./libs/react.development.js"></script>
     <script src="./libs/react-dom.development.js"></script>

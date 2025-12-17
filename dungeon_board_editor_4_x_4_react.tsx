@@ -1335,6 +1335,362 @@ function DungeonBoardEditorTrue3D() {
     });
   }
 
+  const CellsPanel = () => (
+    <div className="tree-node">
+      <div className="tree-label">Celle</div>
+      <div className="tree-children">
+        <div>
+          <div className="section-title">Pennello cella</div>
+          <div className="controls-grid">
+            {(["floor", "pit", "water"] as CellType[]).map((t) => (
+              <button key={t} className={`btn ${cellBrush === t ? "active" : ""}`} onClick={() => setCellBrush(t)}>
+                {t === "floor" ? "Pavimento" : t === "pit" ? "Baratro" : "Acqua"}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="tree-node">
+          <div className="tree-label">Texture</div>
+          <div className="tree-children">
+            <div className="stack">
+              <div className="section-title">Pavimento (PNG/JPG)</div>
+              <div className="small break-all">{texFloorUrl ?? "-"}</div>
+              <div className="flex gap-6">
+                <input type="file" accept="image/*" onChange={setFromFile(setTexFloorUrl)} />
+                <button className="btn" onClick={() => clearUrl(texFloorUrl, setTexFloorUrl)}>
+                  Pulisci
+                </button>
+              </div>
+            </div>
+            <div className="stack">
+              <div className="section-title">Acqua (PNG/JPG)</div>
+              <div className="small break-all">{texWaterUrl ?? "-"}</div>
+              <div className="flex gap-6">
+                <input type="file" accept="image/*" onChange={setFromFile(setTexWaterUrl)} />
+                <button className="btn" onClick={() => clearUrl(texWaterUrl, setTexWaterUrl)}>
+                  Pulisci
+                </button>
+              </div>
+            </div>
+            <div className="stack">
+              <div className="section-title">Baratro (PNG/JPG)</div>
+              <div className="small break-all">{texPitUrl ?? "-"}</div>
+              <div className="flex gap-6">
+                <input type="file" accept="image/*" onChange={setFromFile(setTexPitUrl)} />
+                <button className="btn" onClick={() => clearUrl(texPitUrl, setTexPitUrl)}>
+                  Pulisci
+                </button>
+              </div>
+            </div>
+            <div className="controls-grid">
+              <label className="text-xs">
+                <div className="section-title">Ripetizione texture</div>
+                <input type="range" min={1} max={6} step={1} value={texRepeat} onChange={(e) => setTexRepeat(Number(e.target.value))} />
+                <div className="small">{texRepeat}x per cella</div>
+              </label>
+              <label className="text-xs">
+                <div className="section-title">Opacita acqua</div>
+                <input type="range" min={0.4} max={1} step={0.01} value={waterOpacity} onChange={(e) => setWaterOpacity(Number(e.target.value))} />
+                <div className="small">{waterOpacity.toFixed(2)}</div>
+              </label>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const EdgesPanel = () => (
+    <div className="tree-node">
+      <div className="tree-label">Bordi</div>
+      <div className="tree-children">
+        <div>
+          <div className="section-title">Pennello bordo</div>
+          <div className="controls-grid">
+            {(["wall", "door"] as const).map((t) => (
+              <button key={t} className={`btn ${edgeBrush === t ? "active" : ""}`} onClick={() => setEdgeBrush(t)}>
+                {t === "wall" ? "Parete" : "Porta"}
+              </button>
+            ))}
+          </div>
+          <div className="hint">Clic vicino al bordo tra due celle per inserire/rimuovere.</div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const ObjectsPanel = () => (
+    <div className="tree-node">
+      <div className="tree-label">Oggetti</div>
+      <div className="tree-children">
+        <div className="tree-node">
+          <div className="tree-label">Pennello base</div>
+          <div className="controls-grid">
+            {(["lever", "trapdoor", "torch", "bridge", "light"] as const).map((t) => (
+              <button key={t} className={`btn ${objectBrush === t ? "active" : ""}`} onClick={() => setObjectBrush(t)}>
+                {t === "lever" ? "Leva" : t === "trapdoor" ? "Botola" : t === "torch" ? "Torcia" : t === "bridge" ? "Ponte" : "Luce"}
+              </button>
+            ))}
+            <button className={`btn ${objectBrush === "none" ? "active" : ""}`} onClick={() => setObjectBrush("none")}>
+              Gomma
+            </button>
+          </div>
+          <div className="hint">Ponte solo su Acqua/Baratro. Riclic per ruotare. Le luci sono punti luce.</div>
+        </div>
+
+        <div className="tree-node">
+          <div className="tree-label">Oggetti custom (.glb)</div>
+          <div className="flex gap-6">
+            <button className="btn active" onClick={() => fileInputRef.current?.click()}>Aggiungi oggetto</button>
+            <input
+              ref={fileInputRef as any}
+              type="file"
+              accept=".glb"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) loadCustomGlb(file);
+                e.target.value = "";
+              }}
+            />
+          </div>
+          {Object.keys(customTemplates).length > 0 && (
+            <div className="controls-grid" style={{ marginTop: 8 }}>
+              {Object.keys(customTemplates).map((name) => (
+                <button
+                  key={name}
+                  className={`btn ${customBrush === name ? "active" : ""}`}
+                  onClick={() => {
+                    setCustomBrush(name);
+                    setObjectBrush("none");
+                  }}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          )}
+          {Object.keys(customTemplates).length === 0 && <div className="hint">Carica un .glb per piazzarlo con click sinistro.</div>}
+          {customBrush && <div className="hint">Tasto destro: trascina per spostare, destro + Alt per scalare. Uno per cella per nome.</div>}
+        </div>
+
+        <div className="tree-node">
+          <div className="tree-label">Luci</div>
+          <div className="controls-grid">
+            <label className="text-xs">
+              <div className="section-title">Ambiente (intensita)</div>
+              <input type="range" min={0} max={0.8} step={0.01} value={ambient} onChange={(e) => setAmbient(Number(e.target.value))} />
+            </label>
+            <div className="text-xs">
+              <div className="section-title">Colore ambiente</div>
+              <div className="flex items-center gap-4">
+                <input type="color" value={ambientColor} onChange={(e) => setAmbientColor(e.target.value)} />
+                <input value={ambientColor} onChange={(e) => setAmbientColor(e.target.value)} />
+              </div>
+            </div>
+            <div className="text-xs">
+              <div className="section-title">Colore torcia (mesh)</div>
+              <div className="flex items-center gap-4">
+                <input type="color" value={torchColor} onChange={(e) => setTorchColor(e.target.value)} />
+                <input value={torchColor} onChange={(e) => setTorchColor(e.target.value)} />
+              </div>
+            </div>
+          </div>
+          <div className="section-title" style={{ marginTop: 8 }}>
+            Luci puntiformi piazzate
+          </div>
+          {lights.length === 0 && <div className="hint">Nessuna luce: scegli "Luce" e clicca una cella.</div>}
+          {lights.length > 0 && (
+            <div className="stack">
+              {lights.map((l) => (
+                <button
+                  key={l.idx}
+                  className={`btn ${selectedLightCell === l.idx ? "active" : ""}`}
+                  onClick={() => {
+                    setSelectedLightCell(l.idx);
+                    setEditingLight({ ...l.light });
+                  }}
+                >
+                  Luce ({l.x + 1},{l.y + 1})
+                </button>
+              ))}
+            </div>
+          )}
+
+          {selectedLightCell !== null && editingLight && (
+            <div className="controls-grid">
+              <label className="text-xs">
+                <div className="section-title">Luce: intensita</div>
+                <input
+                  type="range"
+                  min={0}
+                  max={20}
+                  step={0.1}
+                  value={editingLight.intensity}
+                  onChange={(e) => updateSelectedLight({ intensity: Number(e.target.value) })}
+                />
+              </label>
+              <label className="text-xs">
+                <div className="section-title">Luce: distanza</div>
+                <input
+                  type="range"
+                  min={1}
+                  max={8}
+                  step={0.1}
+                  value={editingLight.distance}
+                  onChange={(e) => updateSelectedLight({ distance: Number(e.target.value) })}
+                />
+              </label>
+              <label className="text-xs">
+                <div className="section-title">Luce: decay</div>
+                <input
+                  type="range"
+                  min={0}
+                  max={3}
+                  step={0.1}
+                  value={editingLight.decay}
+                  onChange={(e) => updateSelectedLight({ decay: Number(e.target.value) })}
+                />
+              </label>
+              <div className="text-xs">
+                <div className="section-title">Luce: colore</div>
+                <div className="flex items-center gap-4">
+                  <input
+                    type="color"
+                    value={editingLight.color}
+                    onChange={(e) => updateSelectedLight({ color: e.target.value })}
+                  />
+                  <input
+                    value={editingLight.color}
+                    onChange={(e) => updateSelectedLight({ color: e.target.value })}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="controls-grid">
+            <label className="text-xs">
+              <div className="section-title">Torcia: intensita (solo fiamma visiva)</div>
+              <input type="range" min={0} max={20} step={0.1} value={torchIntensity} onChange={(e) => setTorchIntensity(Number(e.target.value))} />
+            </label>
+            <label className="text-xs">
+              <div className="section-title">Torcia: distanza</div>
+              <input type="range" min={1} max={8} step={0.1} value={torchDistance} onChange={(e) => setTorchDistance(Number(e.target.value))} />
+            </label>
+            <label className="text-xs">
+              <div className="section-title">Torcia: decay</div>
+              <input type="range" min={0} max={3} step={0.1} value={torchDecay} onChange={(e) => setTorchDecay(Number(e.target.value))} />
+            </label>
+          </div>
+        </div>
+
+        {customObjects.length > 0 && (
+          <div className="tree-node">
+            <div className="tree-label">Oggetti piazzati</div>
+            <div className="stack">
+              {customObjects.map((c) => (
+                <button
+                  key={c.id}
+                  className={`btn ${selectedCustomId === c.id ? "active" : ""}`}
+                  onClick={() => setSelectedCustomId(c.id)}
+                >
+                  {c.name} ({c.x + 1},{c.y + 1})
+                </button>
+              ))}
+            </div>
+            {selectedCustomId !== null && (
+              <div className="controls-grid" style={{ marginTop: 6 }}>
+                <label className="text-xs">
+                  <div className="section-title">Scala</div>
+                  <input
+                    type="range"
+                    min={0.3}
+                    max={3}
+                    step={0.05}
+                    value={customObjects.find((c) => c.id === selectedCustomId)?.scale ?? 1}
+                    onChange={(e) => updateSelectedCustom({ scale: Number(e.target.value) })}
+                  />
+                </label>
+                <label className="text-xs">
+                  <div className="section-title">Altezza (y)</div>
+                  <input
+                    type="range"
+                    min={-1}
+                    max={3}
+                    step={0.02}
+                    value={customObjects.find((c) => c.id === selectedCustomId)?.yOffset ?? 0}
+                    onChange={(e) => updateSelectedCustom({ yOffset: Number(e.target.value) })}
+                  />
+                </label>
+                <label className="text-xs">
+                  <div className="section-title">Rotazione (gradi)</div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={359}
+                    step={1}
+                    value={customObjects.find((c) => c.id === selectedCustomId)?.rotation ?? 0}
+                    onChange={(e) => updateSelectedCustom({ rotation: Number(e.target.value) })}
+                  />
+                </label>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const CameraPanel = () => (
+    <div className="tree-node">
+      <div className="tree-label">Camera</div>
+      <div className="controls-grid">
+        <button className={`btn ${cameraMode === "iso" ? "active" : ""}`} onClick={() => setCameraMode("iso")}>
+          Isometrica
+        </button>
+        <button className={`btn ${cameraMode === "top" ? "active" : ""}`} onClick={() => setCameraMode("top")}>
+          Top-down
+        </button>
+      </div>
+    </div>
+  );
+
+  const ExportPanel = () => (
+    <div className="tree-node">
+      <div className="tree-label">Export</div>
+      <div className="flex flex-wrap items-center gap-10">
+        <button className="btn active" onClick={exportPng}>
+          PNG (print)
+        </button>
+        <button className="btn" onClick={exportJson}>
+          Salva dungeon (JSON)
+        </button>
+        <button className="btn" onClick={() => importJsonRef.current?.click()}>
+          Carica dungeon
+        </button>
+        <input
+          ref={importJsonRef as any}
+          type="file"
+          accept="application/json"
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) importJson(file);
+            e.target.value = "";
+          }}
+        />
+        <button className="btn" onClick={resetAll}>
+          Reset
+        </button>
+        <div className="small" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span>Render scale</span>
+          <input style={{ width: 64 }} type="number" min={1} max={8} value={renderScale} onChange={(e) => setRenderScale(clamp(Number(e.target.value || 1), 1, 8))} />
+        </div>
+      </div>
+      {status && <div className="small">{status}</div>}
+    </div>
+  );
+
   return (
     <div className="app-shell">
       <div className="panel">
