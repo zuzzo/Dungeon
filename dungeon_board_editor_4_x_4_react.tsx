@@ -2,31 +2,26 @@ const { useEffect, useMemo, useRef, useState } = React;
 const THREE = window.THREE;
 
 /**
- * Dungeon Board Editor - TRUE 3D (No R3F / No Drei)
- *
- * This version removes react-three-fiber/drei to avoid runtime issues in some sandboxes.
- * It uses plain Three.js, managed from React via refs.
- *
- * Features:
- * - 4x4 grid
- * - Cells: floor / pit / water
- * - Edges: wall / door
- * - Objects: lever / trapdoor / torch / bridge
- * - Torches: real PointLight with selectable color
- * - Export PNG (uses renderer.domElement.toDataURL)
+ * Dungeon Board Editor - TRUE 3D (plain Three.js + React)
+ * - Griglia ridimensionabile
+ * - Celle: pavimento, baratro (pareti aperte), acqua animata con texture offset per cella
+ * - Bordi: muro/porta con texture opzionali
+ * - Oggetti: leva, botola, torcia (mesh + luce), ponte, scala per piani rialzati, luce puntiforme, erba animata, custom GLB
+ * - Texture personalizzabili (pavimento/acqua/baratro/muro/porta)
+ * - Export PNG e JSON (v3) con salvataggio impostazioni
  */
 
-const GRID_W = 4;
-const GRID_H = 4;
+const DEFAULT_GRID_W = 4;
+const DEFAULT_GRID_H = 4;
 
-type CellType = "floor" | "pit" | "water";
+type CellType = "floor" | "pit" | "water" | "raised";
 type EdgeType = "none" | "wall" | "door";
-type ObjType = "none" | "lever" | "trapdoor" | "torch" | "bridge" | "light";
+type ObjType = "none" | "lever" | "trapdoor" | "torch" | "bridge" | "light" | "grass" | "stair";
 
 type ToolMode = "cells" | "edges" | "objects";
 
 type LightProps = { color: string; intensity: number; distance: number; decay: number };
-type ObjectPlacement = { type: ObjType; rotation: 0 | 90 | 180 | 270; light?: LightProps };
+type ObjectPlacement = { type: ObjType; rotation: 0 | 90 | 180 | 270; light?: LightProps; grassColor?: string };
 type CustomPlacement = { id: number; name: string; url: string; x: number; y: number; scale: number; yOffset: number; rotation: number };
 
 type BoardState = {
@@ -40,22 +35,22 @@ function clamp(n: number, a: number, b: number) {
   return Math.max(a, Math.min(b, n));
 }
 
-function idxCell(x: number, y: number) {
-  return y * GRID_W + x;
+function idxCell(x: number, y: number, w: number) {
+  return y * w + x;
 }
-function idxHEdge(x: number, y: number) {
-  return y * GRID_W + x;
+function idxHEdge(x: number, y: number, w: number) {
+  return y * w + x;
 }
-function idxVEdge(x: number, y: number) {
-  return y * (GRID_W + 1) + x;
+function idxVEdge(x: number, y: number, w: number) {
+  return y * (w + 1) + x;
 }
 
-function makeEmptyState(): BoardState {
+function makeEmptyState(w: number = DEFAULT_GRID_W, h: number = DEFAULT_GRID_H): BoardState {
   return {
-    cells: Array(GRID_W * GRID_H).fill("floor"),
-    hEdges: Array((GRID_H + 1) * GRID_W).fill("none"),
-    vEdges: Array(GRID_H * (GRID_W + 1)).fill("none"),
-    objects: Array(GRID_W * GRID_H)
+    cells: Array(w * h).fill("floor"),
+    hEdges: Array((h + 1) * w).fill("none"),
+    vEdges: Array(h * (w + 1)).fill("none"),
+    objects: Array(w * h)
       .fill(null)
       .map(() => ({ type: "none", rotation: 0 })),
   };
@@ -93,7 +88,11 @@ type Pick =
   | { kind: "edge"; dir: "h" | "v"; x: number; y: number };
 
 function DungeonBoardEditorTrue3D() {
-  const [board, setBoard] = useState<BoardState>(() => makeEmptyState());
+  const [gridW, setGridW] = useState(DEFAULT_GRID_W);
+  const [gridH, setGridH] = useState(DEFAULT_GRID_H);
+  const [board, setBoard] = useState<BoardState>(() => makeEmptyState(DEFAULT_GRID_W, DEFAULT_GRID_H));
+  const [pendingGridW, setPendingGridW] = useState(gridW);
+  const [pendingGridH, setPendingGridH] = useState(gridH);
 
   const [mode, setMode] = useState<ToolMode>("cells");
   const [cellBrush, setCellBrush] = useState<CellType>("floor");
@@ -109,6 +108,7 @@ function DungeonBoardEditorTrue3D() {
   const [editingLight, setEditingLight] = useState<LightProps | null>(null);
 
   const [status, setStatus] = useState<string>("");
+  const statusTimerRef = useRef<number | null>(null);
 
   const [cameraMode, setCameraMode] = useState<"top" | "iso">("iso");
 
@@ -118,10 +118,15 @@ function DungeonBoardEditorTrue3D() {
   const [torchIntensity, setTorchIntensity] = useState(7.5);
   const [torchDistance, setTorchDistance] = useState(3.2);
   const [torchDecay, setTorchDecay] = useState(2.0);
+  const [grassColor, setGrassColor] = useState("#4fa64f");
+  const [grassDensity, setGrassDensity] = useState(6);
+  const [grassDecay, setGrassDecay] = useState(1); // inteso come copertura (0-1) della cella
 
   const [texFloorUrl, setTexFloorUrl] = useState<string | null>(null);
   const [texWaterUrl, setTexWaterUrl] = useState<string | null>(null);
   const [texPitUrl, setTexPitUrl] = useState<string | null>(null);
+  const [texWallUrl, setTexWallUrl] = useState<string | null>(null);
+  const [texDoorUrl, setTexDoorUrl] = useState<string | null>(null);
   const [texRepeat, setTexRepeat] = useState(2);
   const [waterOpacity, setWaterOpacity] = useState(0.78);
 
@@ -159,12 +164,19 @@ function DungeonBoardEditorTrue3D() {
     lastY: 0,
     yaw: Math.PI * 0.25,
     pitch: Math.PI * 0.28,
-    dist: 9,
+    dist: 6.5,
   });
 
+  useEffect(() => {
+    setPendingGridW(gridW);
+    setPendingGridH(gridH);
+  }, [gridW, gridH]);
+
   const cellSize = 1;
-  const halfW = (GRID_W * cellSize) / 2;
-  const halfH = (GRID_H * cellSize) / 2;
+  const halfW = (gridW * cellSize) / 2;
+  const halfH = (gridH * cellSize) / 2;
+
+  const cellLabel = (t: CellType) => (t === "floor" ? "Pavimento" : t === "pit" ? "Baratro" : t === "water" ? "Acqua" : "Piano rialzato");
 
   function releaseTexture(url: string | null) {
     if (!url) return;
@@ -196,6 +208,21 @@ function DungeonBoardEditorTrue3D() {
 
   const gltfLoaderRef = useRef<THREE.GLTFLoader | null>(null);
 
+  function flashStatus(message: string, duration = 1200) {
+    setStatus(message);
+    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current);
+    statusTimerRef.current = window.setTimeout(() => {
+      setStatus("");
+      statusTimerRef.current = null;
+    }, duration);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current);
+    };
+  }, []);
+
   useEffect(() => {
     if (!gltfLoaderRef.current && (THREE as any).GLTFLoader) {
       gltfLoaderRef.current = new (THREE as any).GLTFLoader();
@@ -208,8 +235,7 @@ function DungeonBoardEditorTrue3D() {
     if (!loader && LoaderClass) loader = new LoaderClass();
     if (!loader) {
       console.error("GLTFLoader non trovato: assicurati che lo script sia caricato.");
-      setStatus("GLTFLoader non disponibile.");
-      setTimeout(() => setStatus(""), 1200);
+      flashStatus("GLTFLoader non disponibile.");
       return;
     }
     gltfLoaderRef.current = loader;
@@ -247,14 +273,12 @@ function DungeonBoardEditorTrue3D() {
         const name = file.name.replace(/\\.glb$/i, "");
         setCustomTemplates((prev) => ({ ...prev, [name]: scene }));
         setCustomBrush(name);
-        setStatus(`Caricato ${file.name}`);
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus(`Caricato ${file.name}`);
       },
       undefined,
       (err: any) => {
         console.error("Errore GLB", err);
-        setStatus(`Errore nel caricare ${file.name}`);
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus(`Errore nel caricare ${file.name}`);
       }
     );
   }
@@ -282,6 +306,8 @@ function DungeonBoardEditorTrue3D() {
     const floorMap = getTexture(texFloorUrl);
     const waterMap = getTexture(texWaterUrl);
     const pitMap = getTexture(texPitUrl);
+    const wallMap = getTexture(texWallUrl);
+    const doorMap = getTexture(texDoorUrl);
 
     // Materials
     const makeWaterMaterial = () => {
@@ -324,11 +350,20 @@ function DungeonBoardEditorTrue3D() {
       water: makeWaterMaterial(),
       pit: new THREE.MeshStandardMaterial(
         pitMap
-          ? { color: 0xffffff, roughness: 1.0, metalness: 0.0, map: pitMap }
-          : { color: 0xffffff, roughness: 1.0, metalness: 0.0 }
+          ? { color: 0xffffff, roughness: 1.0, metalness: 0.0, map: pitMap, side: THREE.DoubleSide }
+          : { color: 0x111111, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide }
       ),
-      wall: new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.85, metalness: 0.0 }),
-      door: new THREE.MeshStandardMaterial({ color: 0x8b572a, roughness: 0.65, metalness: 0.05 }),
+      grass: new THREE.MeshStandardMaterial({ color: 0x4fa64f, roughness: 0.85, metalness: 0.0, side: THREE.DoubleSide }),
+      wall: new THREE.MeshStandardMaterial(
+        wallMap
+          ? { color: 0xffffff, roughness: 0.85, metalness: 0.0, map: wallMap }
+          : { color: 0x151515, roughness: 0.85, metalness: 0.0 }
+      ),
+      door: new THREE.MeshStandardMaterial(
+        doorMap
+          ? { color: 0xffffff, roughness: 0.65, metalness: 0.05, map: doorMap }
+          : { color: 0x8b572a, roughness: 0.65, metalness: 0.05 }
+      ),
       bridge: new THREE.MeshStandardMaterial({ color: 0x6b3f09, roughness: 0.85, metalness: 0.0 }),
       lever: new THREE.MeshStandardMaterial({ color: 0x303030, roughness: 0.6, metalness: 0.05 }),
       trapdoor: new THREE.MeshStandardMaterial({ color: 0x2b2b2b, roughness: 0.9, metalness: 0.0 }),
@@ -340,10 +375,31 @@ function DungeonBoardEditorTrue3D() {
         emissive: 0xff9a2e,
         emissiveIntensity: 0.7,
       }),
-    } as const;
+      } as const;
+
+    const cloneMatWithOffset = (base: THREE.Material, map: THREE.Texture | null, x: number, y: number) => {
+      const mat = base.clone() as any;
+      if (map) {
+        const tex = map.clone();
+        // Offset deterministico ma diverso per ogni cella, mescolando x e y per entrambe le componenti
+        const { u } = stableOffset(x * 379 + y * 9973, y * 733 + x * 6151);
+        const { v } = stableOffset(x * 4441 + y * 271, y * 811 + x * 1223);
+        // preserva le impostazioni originali della texture
+        tex.repeat.copy(map.repeat);
+        tex.wrapS = map.wrapS;
+        tex.wrapT = map.wrapT;
+        tex.offset.set(u, v); // offset diverso per cella, senza rotazione
+        tex.needsUpdate = true;
+        mat.map = tex;
+      }
+      mat.needsUpdate = true;
+      return mat;
+    };
 
     // Geometries
     const wallHeight = 0.5 * 2; // altezza raddoppiata
+    const raisedTop = 0.4; // altezza piano rialzato (quota della superficie superiore)
+    const raisedTileCenter = raisedTop - 0.07; // centro della mattonella rialzata
 
     const makeBeveledTile = () => {
       const size = cellSize * 0.9; // lascia più spazio tra le celle
@@ -376,6 +432,11 @@ function DungeonBoardEditorTrue3D() {
       return geo;
     };
 
+    const stairWidth = cellSize * 0.5;
+    const stairLength = cellSize * 0.5;
+    const stairStepHeight = raisedTop / 3;
+    const stairStepDepth = stairLength / 3;
+
     const geo = {
       tile: makeBeveledTile(),
       // Più segmenti per rendere l'ondulazione meno rigida
@@ -388,8 +449,28 @@ function DungeonBoardEditorTrue3D() {
       trap: new THREE.BoxGeometry(0.45, 0.06, 0.45),
       // Ponte più largo e lungo quanto la casella
       bridge: new THREE.BoxGeometry(cellSize, 0.08, 0.44),
+      stairStep: new THREE.BoxGeometry(stairWidth, stairStepHeight, stairStepDepth),
       torch: new THREE.BoxGeometry(0.08, 0.18, 0.08),
       flame: new THREE.SphereGeometry(0.06, 18, 18),
+      // Triangolo per ciuffo d'erba (base a terra, punta in alto)
+      grassBlade: (() => {
+        const geo = new THREE.BufferGeometry();
+        const verts = new Float32Array([
+          -0.04, 0, 0, // base sinistra
+          0.04, 0, 0, // base destra
+          0, 0.22, 0, // punta
+        ]);
+        const uvs = new Float32Array([
+          0, 0,
+          1, 0,
+          0.5, 1,
+        ]);
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex([0, 1, 2]);
+        geo.computeVertexNormals();
+        return geo;
+      })(),
     } as const;
 
     // Groups
@@ -397,7 +478,7 @@ function DungeonBoardEditorTrue3D() {
 
     // Pick plane (invisible, but we keep a reference)
     const pickPlane = new THREE.Mesh(
-      new THREE.PlaneGeometry(GRID_W * cellSize, GRID_H * cellSize),
+      new THREE.PlaneGeometry(gridW * cellSize, gridH * cellSize),
       new THREE.MeshBasicMaterial({ transparent: true, opacity: 0 })
     );
     pickPlane.name = "PICK_PLANE";
@@ -407,7 +488,7 @@ function DungeonBoardEditorTrue3D() {
 
     // Base plane for shadows
     const base = new THREE.Mesh(
-      new THREE.PlaneGeometry(GRID_W * cellSize + 0.25, GRID_H * cellSize + 0.25),
+      new THREE.PlaneGeometry(gridW * cellSize + 0.25, gridH * cellSize + 0.25),
       new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 })
     );
     base.rotation.x = -Math.PI / 2;
@@ -415,27 +496,34 @@ function DungeonBoardEditorTrue3D() {
     base.visible = false; // evita di vedere un piano grigio tra pavimento e baratro
     root.add(base);
 
-    // Grid lines (visual separation between cells)
-    const grid = new THREE.GridHelper(GRID_W * cellSize, GRID_W, 0x000000, 0x000000);
-    grid.name = "GRID";
-    grid.position.set(0, 0.151, 0); // slightly above tile tops
-    // @ts-ignore
-    if (grid.material) {
-      // @ts-ignore
-      grid.material.transparent = true;
-      // @ts-ignore
-      grid.material.opacity = 0.6;
-      // @ts-ignore
-      grid.material.depthWrite = false;
+    // Grid lines (visual separation between cells) senza sfalsamenti anche se W≠H
+    const gridLines = new THREE.Group();
+    const lineMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false });
+    const lineY = 0.151;
+    for (let ix = 0; ix <= gridW; ix++) {
+      const xPos = ix * cellSize - halfW;
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.Float32BufferAttribute([xPos, lineY, -halfH, xPos, lineY, halfH], 3));
+      const line = new THREE.LineSegments(geom, lineMat);
+      gridLines.add(line);
     }
-    root.add(grid);
+    for (let iz = 0; iz <= gridH; iz++) {
+      const zPos = iz * cellSize - halfH;
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.Float32BufferAttribute([-halfW, lineY, zPos, halfW, lineY, zPos], 3));
+      const line = new THREE.LineSegments(geom, lineMat);
+      gridLines.add(line);
+    }
+    gridLines.name = "GRID_LINES";
+    root.add(gridLines);
 
     // Tiles (skip pits here, handled later as merged regions)
-    const isPit = (x: number, y: number) => board.cells[idxCell(x, y)] === "pit";
+    const isPit = (x: number, y: number) => board.cells[idxCell(x, y, gridW)] === "pit";
+    const isRaised = (x: number, y: number) => board.cells[idxCell(x, y, gridW)] === "raised";
 
-    for (let y = 0; y < GRID_H; y++) {
-      for (let x = 0; x < GRID_W; x++) {
-        const i = idxCell(x, y);
+    for (let y = 0; y < gridH; y++) {
+      for (let x = 0; x < gridW; x++) {
+        const i = idxCell(x, y, gridW);
         const type = board.cells[i];
         if (type === "pit") continue;
         const cx = x * cellSize - halfW + cellSize / 2;
@@ -443,7 +531,17 @@ function DungeonBoardEditorTrue3D() {
 
         if (type === "water") {
           // Acqua: la cella e piena d'acqua (niente pavimento sotto visibile).
-          const w = new THREE.Mesh(geo.water, mats.water);
+          const wGeo = geo.water.clone();
+          if (waterMap) {
+            const { u, v } = stableOffset(x, y);
+            const uv = wGeo.attributes.uv as THREE.BufferAttribute;
+            for (let i = 0; i < uv.count; i++) {
+              uv.setX(i, uv.getX(i) + u);
+              uv.setY(i, uv.getY(i) + v);
+            }
+            uv.needsUpdate = true;
+          }
+          const w = new THREE.Mesh(wGeo, mats.water);
           w.position.set(cx, 0.05, cz);
           w.castShadow = true;
           w.receiveShadow = true;
@@ -451,16 +549,60 @@ function DungeonBoardEditorTrue3D() {
           continue;
         }
 
-        let tileMat = mats.floor;
-        if (floorMap) {
-          const matClone = mats.floor.clone();
-          const mapClone = floorMap.clone();
-          const { u, v } = stableOffset(x, y);
-          mapClone.offset.set(u, v);
-          mapClone.needsUpdate = true;
-          matClone.map = mapClone;
-          tileMat = matClone;
+        if (type === "raised") {
+          const tileMat = floorMap ? cloneMatWithOffset(mats.floor, floorMap, x, y) : mats.floor;
+          const tile = new THREE.Mesh(geo.tile, tileMat);
+          tile.position.set(cx, raisedTileCenter, cz);
+          tile.castShadow = true;
+          tile.receiveShadow = true;
+          root.add(tile);
+
+          // Pareti verticali del piano rialzato (mostra solo i lati esposti)
+          const skirtH = raisedTop;
+          const skirtY = skirtH / 2;
+          const skirtT = 0.08;
+          const skirtL = cellSize * 0.9;
+          const skirtMat = mats.wall;
+
+          const neighborRaised = {
+            l: x > 0 && isRaised(x - 1, y),
+            r: x < gridW - 1 && isRaised(x + 1, y),
+            f: y > 0 && isRaised(x, y - 1),
+            b: y < gridH - 1 && isRaised(x, y + 1),
+          };
+
+          if (!neighborRaised.l) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(skirtT, skirtH, skirtL), skirtMat);
+            wall.position.set(cx - skirtL / 2 - skirtT / 2, skirtY, cz);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            root.add(wall);
+          }
+          if (!neighborRaised.r) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(skirtT, skirtH, skirtL), skirtMat);
+            wall.position.set(cx + skirtL / 2 + skirtT / 2, skirtY, cz);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            root.add(wall);
+          }
+          if (!neighborRaised.f) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(skirtL, skirtH, skirtT), skirtMat);
+            wall.position.set(cx, skirtY, cz - skirtL / 2 - skirtT / 2);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            root.add(wall);
+          }
+          if (!neighborRaised.b) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(skirtL, skirtH, skirtT), skirtMat);
+            wall.position.set(cx, skirtY, cz + skirtL / 2 + skirtT / 2);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            root.add(wall);
+          }
+          continue;
         }
+
+        const tileMat = floorMap ? cloneMatWithOffset(mats.floor, floorMap, x, y) : mats.floor;
         const tile = new THREE.Mesh(geo.tile, tileMat);
         tile.position.set(cx, 0.07, cz);
         tile.castShadow = true;
@@ -469,85 +611,78 @@ function DungeonBoardEditorTrue3D() {
       }
     }
 
-    // Merge pit regions into tapered frustums
-    const visited = Array(GRID_W * GRID_H).fill(false);
+        // Pit per cella: cavita aperte con pareti solo dove serve (nessun riempimento dei buchi a L)
     const pitHeight = 0.34;
-    const bottomTaper = 0.6; // base più stretta
-    const topInset = 0.92; // leggera incassatura visibile dall'alto
+    const bottomTaper = 0.6;
+    const topInset = 0.92;
     const topDrop = 0.015;
 
-    const neighbors = [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ];
-
-    const pitRegions: { minX: number; maxX: number; minY: number; maxY: number }[] = [];
-
-    for (let y = 0; y < GRID_H; y++) {
-      for (let x = 0; x < GRID_W; x++) {
-        const idx = idxCell(x, y);
-        if (visited[idx] || !isPit(x, y)) continue;
-        // BFS to find contiguous pit region
-        let minX = x,
-          maxX = x,
-          minY = y,
-          maxY = y;
-        const queue: [number, number][] = [[x, y]];
-        visited[idx] = true;
-        while (queue.length) {
-          const [cx, cy] = queue.shift()!;
-          for (const [dx, dy] of neighbors) {
-            const nx = cx + dx;
-            const ny = cy + dy;
-            if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H) continue;
-            const nIdx = idxCell(nx, ny);
-            if (visited[nIdx] || !isPit(nx, ny)) continue;
-            visited[nIdx] = true;
-            queue.push([nx, ny]);
-            minX = Math.min(minX, nx);
-            maxX = Math.max(maxX, nx);
-            minY = Math.min(minY, ny);
-            maxY = Math.max(maxY, ny);
-          }
-        }
-        pitRegions.push({ minX, maxX, minY, maxY });
-      }
-    }
-
-    for (const region of pitRegions) {
-      const wCells = region.maxX - region.minX + 1;
-      const hCells = region.maxY - region.minY + 1;
-      const width = wCells * cellSize;
-      const depth = hCells * cellSize;
-      const geom = new THREE.BoxGeometry(width, pitHeight, depth, 1, 1, 1);
-      const pos = geom.attributes.position as THREE.BufferAttribute;
-      for (let i = 0; i < pos.count; i++) {
-        const y = pos.getY(i);
-        const x = pos.getX(i);
-        const z = pos.getZ(i);
-        if (y < 0) {
-          pos.setX(i, x * bottomTaper);
-          pos.setZ(i, z * bottomTaper);
-        } else if (y > 0) {
-          pos.setX(i, x * topInset);
-          pos.setZ(i, z * topInset);
-          pos.setY(i, y - topDrop);
-        }
-      }
-      pos.needsUpdate = true;
+    function makePitCellGeometry(hasL: boolean, hasR: boolean, hasF: boolean, hasB: boolean) {
+      const h = pitHeight / 2;
+      const b = 0.5 * bottomTaper;
+      const topY = h - topDrop;
+      // Per-lato inset: se c'è un vicino, niente inset (1), altrimenti topInset
+      const insetL = hasL ? 1 : topInset;
+      const insetR = hasR ? 1 : topInset;
+      const insetF = hasF ? 1 : topInset;
+      const insetB = hasB ? 1 : topInset;
+      const verts = [
+        -0.5 * insetL, topY, -0.5 * insetF, // 0 top front-left
+        0.5 * insetR, topY, -0.5 * insetF,  // 1 top front-right
+        0.5 * insetR, topY, 0.5 * insetB,   // 2 top back-right
+        -0.5 * insetL, topY, 0.5 * insetB,  // 3 top back-left
+        -b, -h, -b, // 4 bottom FL
+        b, -h, -b,  // 5 bottom FR
+        b, -h, b,   // 6 bottom BR
+        -b, -h, b,  // 7 bottom BL
+      ];
+      const faces: number[] = [];
+      const uvs: number[] = [];
+      const pushFace = (a: number, b: number, c: number, d: number, faceUV: number[]) => {
+        faces.push(a, b, c, a, c, d);
+        uvs.push(
+          faceUV[0], faceUV[1],
+          faceUV[2], faceUV[3],
+          faceUV[4], faceUV[5],
+          faceUV[0], faceUV[1],
+          faceUV[4], faceUV[5],
+          faceUV[6], faceUV[7],
+        );
+      };
+      // bottom
+      pushFace(4, 5, 6, 7, [0, 0, 1, 0, 1, 1, 0, 1]);
+      // sides: manteniamo sempre le pareti; con inset a 1 quando c'Ã¨ un vicino si allineano senza buchi
+      pushFace(0, 1, 5, 4, [0, 0, 1, 0, 1, 1, 0, 1]);
+      pushFace(1, 2, 6, 5, [0, 0, 1, 0, 1, 1, 0, 1]);
+      pushFace(2, 3, 7, 6, [0, 0, 1, 0, 1, 1, 0, 1]);
+      pushFace(3, 0, 4, 7, [0, 0, 1, 0, 1, 1, 0, 1]);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+      geom.setIndex(faces);
+      geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
       geom.computeVertexNormals();
-      const pit = new THREE.Mesh(geom, mats.pit);
-      const centerX = (region.minX + region.maxX + 1) * 0.5 * cellSize - halfW;
-      const centerZ = (region.minY + region.maxY + 1) * 0.5 * cellSize - halfH;
-      pit.position.set(centerX, -pitHeight / 2, centerZ);
-      pit.castShadow = true;
-      pit.receiveShadow = true;
-      root.add(pit);
+      return geom;
     }
 
-    const buildDoor = () => {
+    for (let y = 0; y < gridH; y++) {
+      for (let x = 0; x < gridW; x++) {
+        if (!isPit(x, y)) continue;
+        const hasL = isPit(x - 1, y);
+        const hasR = isPit(x + 1, y);
+        const hasF = isPit(x, y - 1);
+        const hasB = isPit(x, y + 1);
+        const geom = makePitCellGeometry(hasL, hasR, hasF, hasB);
+        const pit = new THREE.Mesh(geom, mats.pit);
+        const cx = x * cellSize - halfW + cellSize / 2;
+        const cz = y * cellSize - halfH + cellSize / 2;
+        pit.position.set(cx, -pitHeight / 2, cz);
+        pit.castShadow = true;
+        pit.receiveShadow = true;
+        root.add(pit);
+      }
+    }
+
+const buildDoor = () => {
       const gap = cellSize / 5; // luce dell'apertura
       const postThickness = (cellSize - gap) / 2;
       const depth = 0.16; // spessore raddoppiato
@@ -563,7 +698,7 @@ function DungeonBoardEditorTrue3D() {
       p1.castShadow = true;
       p1.receiveShadow = true;
 
-      const p2 = p1.clone();
+    const p2 = p1.clone();
       p2.position.set(width / 2 - postThickness / 2, wallHeight / 2, 0);
 
       const lintel = new THREE.Mesh(lintelGeo, mats.door);
@@ -578,20 +713,24 @@ function DungeonBoardEditorTrue3D() {
     const doorTemplate = buildDoor();
 
     // Edges: horizontal
-    for (let y = 0; y < GRID_H + 1; y++) {
-      for (let x = 0; x < GRID_W; x++) {
-        const e = board.hEdges[idxHEdge(x, y)];
+    for (let y = 0; y < gridH + 1; y++) {
+      for (let x = 0; x < gridW; x++) {
+        const e = board.hEdges[idxHEdge(x, y, gridW)];
         if (e === "none") continue;
         const cx = x * cellSize - halfW + cellSize / 2;
         const cz = y * cellSize - halfH;
         if (e === "wall") {
-          const mesh = new THREE.Mesh(geo.hedge, mats.wall);
+          const wallMat = wallMap ? cloneMatWithOffset(mats.wall, wallMap, x, y) : mats.wall;
+          const mesh = new THREE.Mesh(geo.hedge, wallMat);
           mesh.position.set(cx, wallHeight / 2, cz);
           mesh.castShadow = true;
           mesh.receiveShadow = true;
           root.add(mesh);
         } else {
           const door = doorTemplate.clone();
+          if (door.material && doorMap) {
+            (door as any).material = cloneMatWithOffset(mats.door, doorMap, x, y);
+          }
           door.position.set(cx, 0, cz);
           root.add(door);
         }
@@ -599,20 +738,24 @@ function DungeonBoardEditorTrue3D() {
     }
 
     // Edges: vertical
-    for (let y = 0; y < GRID_H; y++) {
-      for (let x = 0; x < GRID_W + 1; x++) {
-        const e = board.vEdges[idxVEdge(x, y)];
+    for (let y = 0; y < gridH; y++) {
+      for (let x = 0; x < gridW + 1; x++) {
+        const e = board.vEdges[idxVEdge(x, y, gridW)];
         if (e === "none") continue;
         const cx = x * cellSize - halfW;
         const cz = y * cellSize - halfH + cellSize / 2;
         if (e === "wall") {
-          const mesh = new THREE.Mesh(geo.vedge, mats.wall);
+          const wallMat = wallMap ? cloneMatWithOffset(mats.wall, wallMap, x, y) : mats.wall;
+          const mesh = new THREE.Mesh(geo.vedge, wallMat);
           mesh.position.set(cx, wallHeight / 2, cz);
           mesh.castShadow = true;
           mesh.receiveShadow = true;
           root.add(mesh);
         } else {
           const door = doorTemplate.clone();
+          if (door.material && doorMap) {
+            (door as any).material = cloneMatWithOffset(mats.door, doorMap, x, y);
+          }
           door.position.set(cx, 0, cz);
           door.rotation.y = Math.PI / 2;
           root.add(door);
@@ -635,7 +778,12 @@ function DungeonBoardEditorTrue3D() {
         }
       });
       const halfHgt = (tpl as any).userData?.halfHeight ?? 0;
-      inst.position.set(c.x * cellSize - halfW + cellSize / 2, halfHgt + 0.02 + c.yOffset, c.y * cellSize - halfH + cellSize / 2);
+      const baseYOffset = isRaised(c.x, c.y) ? raisedTop - 0.14 : 0;
+      inst.position.set(
+        c.x * cellSize - halfW + cellSize / 2,
+        halfHgt + 0.02 + c.yOffset + baseYOffset,
+        c.y * cellSize - halfH + cellSize / 2
+      );
       inst.scale.setScalar(c.scale);
       inst.rotation.y = (c.rotation * Math.PI) / 180;
       inst.name = `custom-${c.id}`;
@@ -647,20 +795,22 @@ function DungeonBoardEditorTrue3D() {
     const torchLightColor = toThreeColor(torchColor);
     let hasTorch = false;
     let hasLight = false;
+    const grassRoot = new THREE.Group();
 
-    for (let y = 0; y < GRID_H; y++) {
-      for (let x = 0; x < GRID_W; x++) {
-        const i = idxCell(x, y);
+    for (let y = 0; y < gridH; y++) {
+      for (let x = 0; x < gridW; x++) {
+        const i = idxCell(x, y, gridW);
         const obj = board.objects[i];
         if (!obj || obj.type === "none") continue;
 
         const cx = x * cellSize - halfW + cellSize / 2;
         const cz = y * cellSize - halfH + cellSize / 2;
         const rot = rotateY(obj.rotation);
+        const baseYOffset = board.cells[i] === "raised" ? raisedTop - 0.14 : 0;
 
         if (obj.type === "lever") {
           const g = new THREE.Group();
-          g.position.set(cx, 0.12, cz);
+          g.position.set(cx, 0.12 + baseYOffset, cz);
           g.rotation.y = rot;
 
           const rod = new THREE.Mesh(geo.leverRod, mats.lever);
@@ -676,7 +826,7 @@ function DungeonBoardEditorTrue3D() {
 
         if (obj.type === "trapdoor") {
           const m = new THREE.Mesh(geo.trap, mats.trapdoor);
-          m.position.set(cx, 0.13, cz);
+          m.position.set(cx, 0.13 + baseYOffset, cz);
           m.rotation.y = rot;
           m.castShadow = true;
           root.add(m);
@@ -685,17 +835,76 @@ function DungeonBoardEditorTrue3D() {
 
         if (obj.type === "bridge") {
           const m = new THREE.Mesh(geo.bridge, mats.bridge);
-          m.position.set(cx, 0.16, cz);
+          m.position.set(cx, 0.16 + baseYOffset, cz);
           m.rotation.y = rot;
           m.castShadow = true;
           root.add(m);
           continue;
         }
 
+        if (obj.type === "stair") {
+          const g = new THREE.Group();
+          for (let s = 0; s < 3; s++) {
+            const step = new THREE.Mesh(geo.stairStep, mats.bridge);
+            step.position.set(0, stairStepHeight / 2 + s * stairStepHeight, -stairLength / 2 + stairStepDepth / 2 + s * stairStepDepth);
+            step.castShadow = true;
+            step.receiveShadow = true;
+            g.add(step);
+          }
+          const dir =
+            obj.rotation === 0
+              ? { dx: 0, dz: 1 }
+              : obj.rotation === 90
+              ? { dx: 1, dz: 0 }
+              : obj.rotation === 180
+              ? { dx: 0, dz: -1 }
+              : { dx: -1, dz: 0 };
+          const offset = cellSize / 2 - stairLength / 2;
+          g.position.set(cx + dir.dx * offset, 0, cz + dir.dz * offset);
+          g.rotation.y = rot;
+          root.add(g);
+          continue;
+        }
+
+        if (obj.type === "grass") {
+          const blades = Math.max(1, Math.round(grassDensity));
+          for (let b = 0; b < blades; b++) {
+            const blade = new THREE.Mesh(geo.grassBlade, mats.grass.clone());
+            const col = new THREE.Color(obj.grassColor ?? grassColor);
+            (blade.material as THREE.MeshStandardMaterial).color.copy(col);
+            (blade.material as THREE.MeshStandardMaterial).onBeforeCompile = (shader) => {
+              shader.uniforms.time = waterUniformsRef.current.time;
+              shader.vertexShader = shader.vertexShader.replace(
+                "void main() {",
+                /* glsl */ `
+                uniform float time;
+                void main() {`
+              );
+              shader.vertexShader = shader.vertexShader.replace(
+                "#include <begin_vertex>",
+                /* glsl */ `
+                #include <begin_vertex>
+                float sway = sin((position.y * 5.0 + position.x * 6.0 + position.z * 6.0) + time * 1.6) * 0.02;
+                transformed.x += sway;
+              `
+              );
+            };
+            const { u, v } = stableOffset(x * 37 + b * 11, y * 73 + b * 19);
+            const spread = clamp(grassDecay, 0, 1);
+            const range = spread; // 0..1 copre da centro fino ai bordi
+            blade.position.set(cx + (u - 0.5) * range, 0.22 + baseYOffset, cz + (v - 0.5) * range);
+            blade.rotation.y = (u * Math.PI * 2) % (Math.PI * 2);
+            blade.castShadow = true;
+            blade.receiveShadow = true;
+            grassRoot.add(blade);
+          }
+          continue;
+        }
+
         if (obj.type === "torch") {
           hasTorch = true;
           const g = new THREE.Group();
-          g.position.set(cx, 0.22, cz);
+          g.position.set(cx, 0.22 + baseYOffset, cz);
           g.rotation.y = rot;
 
           const stick = new THREE.Mesh(geo.torch, mats.torch);
@@ -713,18 +922,19 @@ function DungeonBoardEditorTrue3D() {
         if (obj.type === "light" && obj.light) {
           hasLight = true;
           const l = new THREE.PointLight(toThreeColor(obj.light.color), obj.light.intensity, obj.light.distance, obj.light.decay);
-          l.position.set(cx, 0.6, cz);
+          l.position.set(cx, 0.6 + baseYOffset, cz);
           l.castShadow = true;
           root.add(l);
           continue;
         }
       }
     }
+    root.add(grassRoot);
 
     root.add(customRoot);
 
     return { root, pickPlane, hasTorch, hasLight, customRoot };
-  }, [board, halfH, halfW, torchColor, torchDecay, torchDistance, torchIntensity, texFloorUrl, texWaterUrl, texPitUrl, texRepeat, waterOpacity, customObjects, customTemplates]);
+  }, [board, halfH, halfW, gridW, gridH, torchColor, torchDecay, torchDistance, torchIntensity, texFloorUrl, texWaterUrl, texPitUrl, texWallUrl, texDoorUrl, texRepeat, waterOpacity, grassColor, grassDensity, grassDecay, customObjects, customTemplates]);
 
   // Initialize renderer + scene once
   useEffect(() => {
@@ -799,13 +1009,15 @@ function DungeonBoardEditorTrue3D() {
 
     // Mouse orbit
     const onDown = (ev: MouseEvent) => {
-      if (cameraMode !== "iso") return;
+      if (cameraMode !== "iso" || ev.button !== 2) return; // usa il tasto destro per ruotare la camera
       orbitRef.current.isDown = true;
       orbitRef.current.lastX = ev.clientX;
       orbitRef.current.lastY = ev.clientY;
     };
     const onMove = (ev: MouseEvent) => {
       if (cameraMode !== "iso") return;
+      // Esclude il mousemove quando il target è uno slider
+      if ((ev.target as HTMLElement)?.tagName === "INPUT") return;
       const o = orbitRef.current;
       if (!o.isDown) return;
       const dx = ev.clientX - o.lastX;
@@ -819,16 +1031,24 @@ function DungeonBoardEditorTrue3D() {
       orbitRef.current.isDown = false;
     };
     const onWheel = (ev: WheelEvent) => {
-      if (cameraMode !== "iso") return;
+      ev.preventDefault();
       const o = orbitRef.current;
-      o.dist = clamp(o.dist + ev.deltaY * 0.01, 4.5, 18);
+      const factor = Math.exp(ev.deltaY * 0.003); // moltiplicativo piu sensibile
+      if (cameraMode === "iso") {
+        o.dist = clamp(o.dist * factor, 0.8, 40); // piu vicino/lontano
+      } else if (cameraMode === "top" && (cameraRef.current as any)?.isOrthographicCamera) {
+        const oc = cameraRef.current as THREE.OrthographicCamera;
+        const zoom = clamp(oc.zoom / factor, 0.1, 8); // inverti per zoom in/out coerente
+        oc.zoom = zoom;
+        oc.updateProjectionMatrix();
+      }
     };
 
     window.addEventListener("resize", resize);
     renderer.domElement.addEventListener("mousedown", onDown);
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-    renderer.domElement.addEventListener("wheel", onWheel, { passive: true });
+    renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
 
     resize();
     animate();
@@ -865,7 +1085,7 @@ function DungeonBoardEditorTrue3D() {
 
     if (cameraMode === "top") {
       const aspect = host.clientWidth / host.clientHeight;
-      const frustum = 3.2;
+      const frustum = 3.2 / 1.5; // vista top piu ravvicinata (~1.5x piu grande)
       cam = new THREE.OrthographicCamera(-frustum * aspect, frustum * aspect, frustum, -frustum, 0.1, 100);
       cam.position.set(0, 8, 0.001);
       cam.up.set(0, 0, -1);
@@ -889,7 +1109,7 @@ function DungeonBoardEditorTrue3D() {
     } else {
       const oc = cam as THREE.OrthographicCamera;
       const aspect = w / h;
-      const frustum = 3.2;
+      const frustum = 3.2 / 1.5; // mantiene la vista top piu grande (~1.5x)
       oc.left = -frustum * aspect;
       oc.right = frustum * aspect;
       oc.top = frustum;
@@ -976,8 +1196,8 @@ function DungeonBoardEditorTrue3D() {
     const lx = p.x + halfW;
     const lz = p.z + halfH;
 
-    const cx = clamp(Math.floor(lx / cellSize), 0, GRID_W - 1);
-    const cy = clamp(Math.floor(lz / cellSize), 0, GRID_H - 1);
+    const cx = clamp(Math.floor(lx / cellSize), 0, gridW - 1);
+    const cy = clamp(Math.floor(lz / cellSize), 0, gridH - 1);
 
     const localX = lx - cx * cellSize;
     const localZ = lz - cy * cellSize;
@@ -1028,8 +1248,8 @@ function DungeonBoardEditorTrue3D() {
     const p = hits[0].point;
     const lx = p.x + halfW;
     const lz = p.z + halfH;
-    const cx = clamp(Math.floor(lx / cellSize), 0, GRID_W - 1);
-    const cy = clamp(Math.floor(lz / cellSize), 0, GRID_H - 1);
+    const cx = clamp(Math.floor(lx / cellSize), 0, gridW - 1);
+    const cy = clamp(Math.floor(lz / cellSize), 0, gridH - 1);
     return { x: cx, y: cy };
   }
 
@@ -1047,6 +1267,7 @@ function DungeonBoardEditorTrue3D() {
   function handleCustomDrag(ev: React.MouseEvent) {
     const st = dragStateRef.current;
     if (!st || st.id === null) return;
+    if ((ev.buttons & 2) === 0) return; // solo tasto destro durante il drag
     if (st.mode === "move") {
       const cell = getCellFromMouse(ev);
       if (!cell) return;
@@ -1075,8 +1296,7 @@ function DungeonBoardEditorTrue3D() {
     // Placement / erase for custom GLB objects (when brush is custom + gomma attiva)
     if (mode === "objects" && pick.kind === "cell" && customBrush && objectBrush === "none") {
       if (!customTemplates[customBrush]) {
-        setStatus("Carica un oggetto prima di piazzarlo.");
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus("Carica un oggetto prima di piazzarlo.");
         return;
       }
       setCustomObjects((prev) => {
@@ -1104,16 +1324,11 @@ function DungeonBoardEditorTrue3D() {
       };
 
       if (pick.kind === "cell") {
-        const i = idxCell(pick.x, pick.y);
+        const i = idxCell(pick.x, pick.y, gridW);
 
         if (mode === "cells") {
           next.cells[i] = cellBrush;
-          setStatus(
-            `Cella (${pick.x + 1},${pick.y + 1}) = ${
-              cellBrush === "floor" ? "Pavimento" : cellBrush === "pit" ? "Baratro" : "Acqua"
-            }`
-          );
-          setTimeout(() => setStatus(""), 900);
+          flashStatus(`Cella (${pick.x + 1},${pick.y + 1}) = ${cellLabel(cellBrush)}`, 900);
           if (cellBrush === "floor" && next.objects[i]?.type === "bridge") next.objects[i] = { type: "none", rotation: 0 };
           return next;
         }
@@ -1135,10 +1350,43 @@ function DungeonBoardEditorTrue3D() {
           if (objectBrush === "bridge") {
             const base = next.cells[i];
             if (base !== "water" && base !== "pit") {
-              setStatus("Il ponte si puo piazzare solo su Acqua o Baratro.");
-              setTimeout(() => setStatus(""), 1400);
+              flashStatus("Il ponte si puo piazzare solo su Acqua o Baratro.", 1400);
               return prev;
             }
+          }
+
+          if (objectBrush === "stair") {
+            const base = prev.cells[i];
+            if (base === "water" || base === "pit" || base === "raised") {
+              flashStatus("La scala va su pavimento accanto a un piano rialzato.", 1400);
+              return prev;
+            }
+            if (next.objects[i].type === "stair") {
+              next.objects[i].rotation = ((next.objects[i].rotation + 90) % 360) as 0 | 90 | 180 | 270;
+              return next;
+            }
+            const dirs = [
+              { dx: 0, dy: 1, rot: 0 as 0 | 90 | 180 | 270 }, // sale verso sud
+              { dx: 0, dy: -1, rot: 180 as 0 | 90 | 180 | 270 }, // sale verso nord
+              { dx: 1, dy: 0, rot: 90 as 0 | 90 | 180 | 270 }, // sale verso est
+              { dx: -1, dy: 0, rot: 270 as 0 | 90 | 180 | 270 }, // sale verso ovest
+            ];
+            const neighbor = dirs.find(({ dx, dy }) => {
+              const nx = pick.x + dx;
+              const ny = pick.y + dy;
+              if (nx < 0 || ny < 0 || nx >= gridW || ny >= gridH) return false;
+              return prev.cells[idxCell(nx, ny, gridW)] === "raised";
+            });
+            if (!neighbor) {
+              flashStatus("Serve un piano rialzato adiacente per piazzare la scala.", 1500);
+              return prev;
+            }
+            next.objects[i] = { type: "stair", rotation: neighbor.rot };
+            if (selectedLightCell === i) {
+              setSelectedLightCell(null);
+              setEditingLight(null);
+            }
+            return next;
           }
 
           if (objectBrush === "none") {
@@ -1150,12 +1398,13 @@ function DungeonBoardEditorTrue3D() {
             return next;
           }
 
-          if (next.objects[i].type === objectBrush) {
+          if (next.objects[i].type === objectBrush && objectBrush !== "grass") {
             next.objects[i].rotation = ((next.objects[i].rotation + 90) % 360) as 0 | 90 | 180 | 270;
           } else {
-            next.objects[i].type = objectBrush;
-            next.objects[i].rotation = 0;
-            next.objects[i].light = undefined;
+            next.objects[i] = { type: objectBrush, rotation: 0 };
+            if (objectBrush === "grass") {
+              next.objects[i].grassColor = grassColor;
+            }
             if (selectedLightCell === i) {
               setSelectedLightCell(null);
               setEditingLight(null);
@@ -1163,19 +1412,18 @@ function DungeonBoardEditorTrue3D() {
           }
           return next;
         }
-        setStatus("Sei in modalita Bordi: per dipingere Acqua/Baratro passa a 'Celle'.");
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus("Sei in modalita Bordi: per dipingere Acqua/Baratro passa a 'Celle'.");
         return prev;
       }
 
       if (pick.kind === "edge") {
         if (mode !== "edges") return prev;
         if (pick.dir === "h") {
-          const id = idxHEdge(pick.x, pick.y);
+          const id = idxHEdge(pick.x, pick.y, gridW);
           next.hEdges[id] = next.hEdges[id] === edgeBrush ? "none" : edgeBrush;
           return next;
         }
-        const id = idxVEdge(pick.x, pick.y);
+        const id = idxVEdge(pick.x, pick.y, gridW);
         next.vEdges[id] = next.vEdges[id] === edgeBrush ? "none" : edgeBrush;
         return next;
       }
@@ -1185,22 +1433,62 @@ function DungeonBoardEditorTrue3D() {
   }
 
   function resetAll() {
-    setBoard(makeEmptyState());
-    setStatus("Reset completato.");
-    setTimeout(() => setStatus(""), 1200);
+    setBoard(makeEmptyState(gridW, gridH));
+    setCustomObjects([]);
+    setSelectedCustomId(null);
+    setSelectedLightCell(null);
+    setEditingLight(null);
+    flashStatus("Reset completato.");
+  }
+
+  function applyGridSize() {
+    const w = clamp(Math.round(Number(pendingGridW) || DEFAULT_GRID_W), 2, 12);
+    const h = clamp(Math.round(Number(pendingGridH) || DEFAULT_GRID_H), 2, 12);
+    const empty = makeEmptyState(w, h);
+    setPendingGridW(w);
+    setPendingGridH(h);
+    setBoard(empty);
+    setCustomObjects([]);
+    setSelectedCustomId(null);
+    setSelectedLightCell(null);
+    setEditingLight(null);
+    setGridW(w);
+    setGridH(h);
+    flashStatus(`Griglia impostata a ${w}x${h}.`);
   }
 
   function exportJson() {
     const payload = {
-      version: 1,
+      version: 3,
+      grid: { w: gridW, h: gridH },
       board,
       customObjects,
+      settings: {
+        ambient,
+        ambientColor,
+        torchColor,
+        torchIntensity,
+        torchDistance,
+        torchDecay,
+        waterOpacity,
+        texRepeat,
+        texFloorUrl,
+        texWaterUrl,
+        texPitUrl,
+        texWallUrl,
+        texDoorUrl,
+        grassColor,
+        grassDensity,
+        grassDecay,
+        renderScale,
+        cameraMode,
+      },
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "dungeon_4x4.json";
+    a.download = `dungeon_${gridW}x${gridH}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1217,22 +1505,58 @@ function DungeonBoardEditorTrue3D() {
         if (!data.board || !data.board.cells || !data.board.hEdges || !data.board.vEdges || !data.board.objects) {
           throw new Error("Board mancante");
         }
+        const fileW = clamp(Math.round(Number(data.grid?.w ?? data.w ?? gridW) || DEFAULT_GRID_W), 2, 12);
+        const fileH = clamp(Math.round(Number(data.grid?.h ?? data.h ?? gridH) || DEFAULT_GRID_H), 2, 12);
+        const empty = makeEmptyState(fileW, fileH);
+        const expectedCells = fileW * fileH;
+        const expectedHEdges = (fileH + 1) * fileW;
+        const expectedVEdges = fileH * (fileW + 1);
+
         const nextBoard: BoardState = {
-          cells: Array.isArray(data.board.cells) && data.board.cells.length === GRID_W * GRID_H ? data.board.cells : makeEmptyState().cells,
-          hEdges:
-            Array.isArray(data.board.hEdges) && data.board.hEdges.length === (GRID_H + 1) * GRID_W
-              ? data.board.hEdges
-              : makeEmptyState().hEdges,
-          vEdges:
-            Array.isArray(data.board.vEdges) && data.board.vEdges.length === GRID_H * (GRID_W + 1)
-              ? data.board.vEdges
-              : makeEmptyState().vEdges,
-          objects:
-            Array.isArray(data.board.objects) && data.board.objects.length === GRID_W * GRID_H
-              ? data.board.objects
-              : makeEmptyState().objects,
+          cells: Array.isArray(data.board.cells) && data.board.cells.length === expectedCells ? data.board.cells : empty.cells,
+          hEdges: Array.isArray(data.board.hEdges) && data.board.hEdges.length === expectedHEdges ? data.board.hEdges : empty.hEdges,
+          vEdges: Array.isArray(data.board.vEdges) && data.board.vEdges.length === expectedVEdges ? data.board.vEdges : empty.vEdges,
+          objects: Array.isArray(data.board.objects) && data.board.objects.length === expectedCells ? data.board.objects : empty.objects,
         };
+        setGridW(fileW);
+        setGridH(fileH);
         setBoard(nextBoard);
+
+        // Settings (versioned)
+        const settings = data.settings ?? {};
+        const numOr = (v: any, fallback: number) => (typeof v === "number" && !Number.isNaN(v) ? v : fallback);
+        const strOr = (v: any, fallback: string) => (typeof v === "string" ? v : fallback);
+
+        setAmbient(numOr(settings.ambient ?? data.ambient, ambient));
+        setAmbientColor(strOr(settings.ambientColor ?? data.ambientColor, ambientColor));
+        setTorchColor(strOr(settings.torchColor ?? data.torchColor, torchColor));
+        setTorchIntensity(numOr(settings.torchIntensity ?? data.torchIntensity, torchIntensity));
+        setTorchDistance(numOr(settings.torchDistance ?? data.torchDistance, torchDistance));
+        setTorchDecay(numOr(settings.torchDecay ?? data.torchDecay, torchDecay));
+        setWaterOpacity(numOr(settings.waterOpacity ?? data.waterOpacity, waterOpacity));
+        setTexRepeat(numOr(settings.texRepeat ?? data.texRepeat, texRepeat));
+        setGrassColor(strOr(settings.grassColor ?? data.grassColor, grassColor));
+        setGrassDensity(numOr(settings.grassDensity ?? data.grassDensity, grassDensity));
+        setGrassDecay(numOr(settings.grassDecay ?? data.grassDecay, grassDecay));
+        setRenderScale(numOr(settings.renderScale ?? data.renderScale, renderScale));
+        const cm = settings.cameraMode ?? data.cameraMode;
+        if (cm === "top" || cm === "iso") setCameraMode(cm);
+
+        const setUrl = (nextUrl: any, current: string | null, setter: (url: string | null) => void) => {
+          if (nextUrl === null) {
+            if (current) releaseTexture(current);
+            setter(null);
+            return;
+          }
+          if (typeof nextUrl !== "string" || !nextUrl.length) return;
+          if (current && current !== nextUrl) releaseTexture(current);
+          setter(nextUrl);
+        };
+        setUrl(settings.texFloorUrl ?? data.texFloorUrl, texFloorUrl, setTexFloorUrl);
+        setUrl(settings.texWaterUrl ?? data.texWaterUrl, texWaterUrl, setTexWaterUrl);
+        setUrl(settings.texPitUrl ?? data.texPitUrl, texPitUrl, setTexPitUrl);
+        setUrl(settings.texWallUrl ?? data.texWallUrl, texWallUrl, setTexWallUrl);
+        setUrl(settings.texDoorUrl ?? data.texDoorUrl, texDoorUrl, setTexDoorUrl);
 
         if (Array.isArray(data.customObjects)) {
           setCustomObjects(
@@ -1242,23 +1566,23 @@ function DungeonBoardEditorTrue3D() {
                 id: typeof c.id === "number" ? c.id : nextCustomIdRef.current++,
                 name: c.name,
                 url: c.url ?? c.name,
-                x: clamp(c.x, 0, GRID_W - 1),
-                y: clamp(c.y, 0, GRID_H - 1),
+                x: clamp(c.x, 0, fileW - 1),
+                y: clamp(c.y, 0, fileH - 1),
                 scale: typeof c.scale === "number" ? clamp(c.scale, 0.3, 3) : 1,
                 yOffset: typeof c.yOffset === "number" ? clamp(c.yOffset, -1, 3) : 0,
                 rotation: typeof c.rotation === "number" ? c.rotation : 0,
               }))
           );
+        } else {
+          setCustomObjects([]);
         }
         setSelectedLightCell(null);
         setEditingLight(null);
         setSelectedCustomId(null);
-        setStatus("Dungeon caricato.");
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus("Dungeon caricato.");
       } catch (err) {
         console.error(err);
-        setStatus("Errore nel caricare il JSON.");
-        setTimeout(() => setStatus(""), 1500);
+        flashStatus("Errore nel caricare il JSON.", 1500);
       }
     };
     reader.readAsText(file);
@@ -1307,9 +1631,11 @@ function DungeonBoardEditorTrue3D() {
     .map(({ o, idx }) => ({
       idx,
       light: o.light as LightProps,
-      x: idx % GRID_W,
-      y: Math.floor(idx / GRID_W),
+      x: idx % gridW,
+      y: Math.floor(idx / gridW),
     }));
+
+  const selectedCustom = customObjects.find((c) => c.id === selectedCustomId);
 
   useEffect(() => {
     // Se la luce selezionata viene cancellata o cambiata, azzera selezione
@@ -1335,6 +1661,40 @@ function DungeonBoardEditorTrue3D() {
     });
   }
 
+  const GridPanel = () => (
+    <div className="tree-node">
+      <div className="tree-label">Griglia</div>
+      <div className="controls-grid">
+        <label className="text-xs">
+          <div className="section-title">Larghezza (celle)</div>
+          <input
+            type="number"
+            min={2}
+            max={12}
+            value={pendingGridW}
+            onChange={(e) => setPendingGridW(clamp(Number(e.target.value || 0), 2, 12))}
+          />
+        </label>
+        <label className="text-xs">
+          <div className="section-title">Altezza (celle)</div>
+          <input
+            type="number"
+            min={2}
+            max={12}
+            value={pendingGridH}
+            onChange={(e) => setPendingGridH(clamp(Number(e.target.value || 0), 2, 12))}
+          />
+        </label>
+      </div>
+      <div className="flex gap-6" style={{ marginTop: 6 }}>
+        <button className="btn active" onClick={applyGridSize}>
+          Applica (reset)
+        </button>
+        <div className="hint">Ridimensionare resetta board e oggetti.</div>
+      </div>
+    </div>
+  );
+
   const CellsPanel = () => (
     <div className="tree-node">
       <div className="tree-label">Celle</div>
@@ -1342,9 +1702,9 @@ function DungeonBoardEditorTrue3D() {
         <div>
           <div className="section-title">Pennello cella</div>
           <div className="controls-grid">
-            {(["floor", "pit", "water"] as CellType[]).map((t) => (
+            {(["floor", "pit", "water", "raised"] as CellType[]).map((t) => (
               <button key={t} className={`btn ${cellBrush === t ? "active" : ""}`} onClick={() => setCellBrush(t)}>
-                {t === "floor" ? "Pavimento" : t === "pit" ? "Baratro" : "Acqua"}
+                {cellLabel(t)}
               </button>
             ))}
           </div>
@@ -1385,12 +1745,28 @@ function DungeonBoardEditorTrue3D() {
             <div className="controls-grid">
               <label className="text-xs">
                 <div className="section-title">Ripetizione texture</div>
-                <input type="range" min={1} max={6} step={1} value={texRepeat} onChange={(e) => setTexRepeat(Number(e.target.value))} />
+                <input
+                  type="range"
+                  min={1}
+                max={6}
+                step={1}
+                value={texRepeat}
+                onChange={(e) => setTexRepeat(Number(e.target.value))}
+                
+              />
                 <div className="small">{texRepeat}x per cella</div>
               </label>
               <label className="text-xs">
                 <div className="section-title">Opacita acqua</div>
-                <input type="range" min={0.4} max={1} step={0.01} value={waterOpacity} onChange={(e) => setWaterOpacity(Number(e.target.value))} />
+                <input
+                  type="range"
+                  min={0.4}
+                max={1}
+                step={0.01}
+                value={waterOpacity}
+                onChange={(e) => setWaterOpacity(Number(e.target.value))}
+                
+              />
                 <div className="small">{waterOpacity.toFixed(2)}</div>
               </label>
             </div>
@@ -1415,6 +1791,32 @@ function DungeonBoardEditorTrue3D() {
           </div>
           <div className="hint">Clic vicino al bordo tra due celle per inserire/rimuovere.</div>
         </div>
+
+        <div className="tree-node">
+          <div className="tree-label">Texture</div>
+          <div className="tree-children">
+            <div className="stack">
+              <div className="section-title">Pareti (PNG/JPG)</div>
+              <div className="small break-all">{texWallUrl ?? "-"}</div>
+              <div className="flex gap-6">
+                <input type="file" accept="image/*" onChange={setFromFile(setTexWallUrl)} />
+                <button className="btn" onClick={() => clearUrl(texWallUrl, setTexWallUrl)}>
+                  Pulisci
+                </button>
+              </div>
+            </div>
+            <div className="stack">
+              <div className="section-title">Porte (PNG/JPG)</div>
+              <div className="small break-all">{texDoorUrl ?? "-"}</div>
+              <div className="flex gap-6">
+                <input type="file" accept="image/*" onChange={setFromFile(setTexDoorUrl)} />
+                <button className="btn" onClick={() => clearUrl(texDoorUrl, setTexDoorUrl)}>
+                  Pulisci
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1426,16 +1828,61 @@ function DungeonBoardEditorTrue3D() {
         <div className="tree-node">
           <div className="tree-label">Pennello base</div>
           <div className="controls-grid">
-            {(["lever", "trapdoor", "torch", "bridge", "light"] as const).map((t) => (
+            {(["lever", "trapdoor", "torch", "bridge", "stair", "light", "grass"] as const).map((t) => (
               <button key={t} className={`btn ${objectBrush === t ? "active" : ""}`} onClick={() => setObjectBrush(t)}>
-                {t === "lever" ? "Leva" : t === "trapdoor" ? "Botola" : t === "torch" ? "Torcia" : t === "bridge" ? "Ponte" : "Luce"}
+                {t === "lever"
+                  ? "Leva"
+                  : t === "trapdoor"
+                  ? "Botola"
+                  : t === "torch"
+                  ? "Torcia"
+                  : t === "bridge"
+                  ? "Ponte"
+                  : t === "stair"
+                  ? "Scala"
+                  : t === "light"
+                  ? "Luce"
+                  : "Erba"}
               </button>
             ))}
             <button className={`btn ${objectBrush === "none" ? "active" : ""}`} onClick={() => setObjectBrush("none")}>
               Gomma
             </button>
           </div>
-          <div className="hint">Ponte solo su Acqua/Baratro. Riclic per ruotare. Le luci sono punti luce.</div>
+          <div className="hint">Ponte solo su Acqua/Baratro. Scala solo accanto a un piano rialzato (ruota con riclic). Luci = punti luce. L'erba ha colore impostabile.</div>
+          {objectBrush === "grass" && (
+            <div className="stack" style={{ marginTop: 6 }}>
+              <div className="flex items-center gap-4">
+                <span className="text-xs">Colore erba</span>
+                <input type="color" value={grassColor} onChange={(e) => setGrassColor(e.target.value)} />
+                <input value={grassColor} onChange={(e) => setGrassColor(e.target.value)} />
+              </div>
+              <label className="text-xs">
+                <div className="section-title">Densita ciuffi</div>
+                <input
+                  type="range"
+                  min={1}
+                  max={20}
+                  step={1}
+                  value={grassDensity}
+                  onChange={(e) => setGrassDensity(Number(e.target.value))}
+                />
+                <div className="small">{grassDensity} per cella</div>
+              </label>
+              <label className="text-xs">
+                <div className="section-title">Copertura erba (0-1)</div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={grassDecay}
+                  onChange={(e) => setGrassDecay(Number(e.target.value))}
+                />
+                <div className="small">{grassDecay.toFixed(2)} della cella</div>
+              </label>
+            </div>
+          )}
         </div>
 
         <div className="tree-node">
@@ -1479,7 +1926,15 @@ function DungeonBoardEditorTrue3D() {
           <div className="controls-grid">
             <label className="text-xs">
               <div className="section-title">Ambiente (intensita)</div>
-              <input type="range" min={0} max={0.8} step={0.01} value={ambient} onChange={(e) => setAmbient(Number(e.target.value))} />
+              <input
+                type="range"
+                min={0}
+                max={0.8}
+                step={0.01}
+                value={ambient}
+                onChange={(e) => setAmbient(Number(e.target.value))}
+                
+              />
             </label>
             <div className="text-xs">
               <div className="section-title">Colore ambiente</div>
@@ -1528,6 +1983,7 @@ function DungeonBoardEditorTrue3D() {
                   step={0.1}
                   value={editingLight.intensity}
                   onChange={(e) => updateSelectedLight({ intensity: Number(e.target.value) })}
+                  
                 />
               </label>
               <label className="text-xs">
@@ -1539,6 +1995,7 @@ function DungeonBoardEditorTrue3D() {
                   step={0.1}
                   value={editingLight.distance}
                   onChange={(e) => updateSelectedLight({ distance: Number(e.target.value) })}
+                  
                 />
               </label>
               <label className="text-xs">
@@ -1550,6 +2007,7 @@ function DungeonBoardEditorTrue3D() {
                   step={0.1}
                   value={editingLight.decay}
                   onChange={(e) => updateSelectedLight({ decay: Number(e.target.value) })}
+                  
                 />
               </label>
               <div className="text-xs">
@@ -1571,15 +2029,39 @@ function DungeonBoardEditorTrue3D() {
           <div className="controls-grid">
             <label className="text-xs">
               <div className="section-title">Torcia: intensita (solo fiamma visiva)</div>
-              <input type="range" min={0} max={20} step={0.1} value={torchIntensity} onChange={(e) => setTorchIntensity(Number(e.target.value))} />
+              <input
+                type="range"
+                min={0}
+                max={20}
+                step={0.1}
+                value={torchIntensity}
+                onChange={(e) => setTorchIntensity(Number(e.target.value))}
+                
+              />
             </label>
             <label className="text-xs">
               <div className="section-title">Torcia: distanza</div>
-              <input type="range" min={1} max={8} step={0.1} value={torchDistance} onChange={(e) => setTorchDistance(Number(e.target.value))} />
+              <input
+                type="range"
+                min={1}
+                max={8}
+                step={0.1}
+                value={torchDistance}
+                onChange={(e) => setTorchDistance(Number(e.target.value))}
+                
+              />
             </label>
             <label className="text-xs">
               <div className="section-title">Torcia: decay</div>
-              <input type="range" min={0} max={3} step={0.1} value={torchDecay} onChange={(e) => setTorchDecay(Number(e.target.value))} />
+              <input
+                type="range"
+                min={0}
+                max={3}
+                step={0.1}
+                value={torchDecay}
+                onChange={(e) => setTorchDecay(Number(e.target.value))}
+                
+              />
             </label>
           </div>
         </div>
@@ -1607,7 +2089,7 @@ function DungeonBoardEditorTrue3D() {
                     min={0.3}
                     max={3}
                     step={0.05}
-                    value={customObjects.find((c) => c.id === selectedCustomId)?.scale ?? 1}
+                    value={selectedCustom?.scale ?? 1}
                     onChange={(e) => updateSelectedCustom({ scale: Number(e.target.value) })}
                   />
                 </label>
@@ -1618,7 +2100,7 @@ function DungeonBoardEditorTrue3D() {
                     min={-1}
                     max={3}
                     step={0.02}
-                    value={customObjects.find((c) => c.id === selectedCustomId)?.yOffset ?? 0}
+                    value={selectedCustom?.yOffset ?? 0}
                     onChange={(e) => updateSelectedCustom({ yOffset: Number(e.target.value) })}
                   />
                 </label>
@@ -1629,7 +2111,7 @@ function DungeonBoardEditorTrue3D() {
                     min={0}
                     max={359}
                     step={1}
-                    value={customObjects.find((c) => c.id === selectedCustomId)?.rotation ?? 0}
+                    value={selectedCustom?.rotation ?? 0}
                     onChange={(e) => updateSelectedCustom({ rotation: Number(e.target.value) })}
                   />
                 </label>
@@ -1696,356 +2178,25 @@ function DungeonBoardEditorTrue3D() {
       <div className="panel">
         <div className="panel-scroll">
           <div className="stack">
-            <div className="flex items-center justify-between gap-3">
-              <div className="section-title">Tool</div>
-              <div className="flex gap-6">
-                <button className={`btn ${mode === "cells" ? "active" : ""}`} onClick={() => setMode("cells")}>
-                  Celle
-                </button>
-                <button className={`btn ${mode === "edges" ? "active" : ""}`} onClick={() => setMode("edges")}>
-                  Bordi
-                </button>
-                <button className={`btn ${mode === "objects" ? "active" : ""}`} onClick={() => setMode("objects")}>
-                  Oggetti
-                </button>
-              </div>
+            <div className="tab-strip">
+              <button className={`tab ${mode === "cells" ? "active" : ""}`} onClick={() => setMode("cells")}>
+                Celle
+              </button>
+              <button className={`tab ${mode === "edges" ? "active" : ""}`} onClick={() => setMode("edges")}>
+                Bordi
+              </button>
+              <button className={`tab ${mode === "objects" ? "active" : ""}`} onClick={() => setMode("objects")}>
+                Oggetti
+              </button>
             </div>
 
-            {mode === "cells" && (
-              <div>
-                <div className="section-title">Pennello cella</div>
-                <div className="controls-grid">
-                  {(["floor", "pit", "water"] as CellType[]).map((t) => (
-                    <button key={t} className={`btn ${cellBrush === t ? "active" : ""}`} onClick={() => setCellBrush(t)}>
-                      {t === "floor" ? "Pavimento" : t === "pit" ? "Baratro" : "Acqua"}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {mode === "edges" && (
-              <div>
-                <div className="section-title">Pennello bordo</div>
-                <div className="controls-grid">
-                  {(["wall", "door"] as const).map((t) => (
-                    <button key={t} className={`btn ${edgeBrush === t ? "active" : ""}`} onClick={() => setEdgeBrush(t)}>
-                      {t === "wall" ? "Parete" : "Porta"}
-                    </button>
-                  ))}
-                </div>
-                <div className="hint">Clic vicino al bordo tra due celle per inserire/rimuovere.</div>
-              </div>
-            )}
-
-            {mode === "objects" && (
-              <div>
-                <div className="section-title">Pennello oggetto</div>
-                <div className="controls-grid">
-                  {(["lever", "trapdoor", "torch", "bridge", "light"] as const).map((t) => (
-                    <button key={t} className={`btn ${objectBrush === t ? "active" : ""}`} onClick={() => setObjectBrush(t)}>
-                      {t === "lever" ? "Leva" : t === "trapdoor" ? "Botola" : t === "torch" ? "Torcia" : t === "bridge" ? "Ponte" : "Luce"}
-                    </button>
-                  ))}
-                  <button className={`btn ${objectBrush === "none" ? "active" : ""}`} onClick={() => setObjectBrush("none")}>
-                    Gomma
-                  </button>
-                </div>
-                <div className="hint">Regola: il ponte si puo piazzare solo su Acqua o Baratro. Riclic per ruotare. Le luci sono solo punti luce.</div>
-
-                <div className="section-title" style={{ marginTop: 10 }}>Oggetti custom (.glb)</div>
-                <div className="flex gap-6">
-                  <button className="btn active" onClick={() => fileInputRef.current?.click()}>Aggiungi oggetto</button>
-                  <input
-                    ref={fileInputRef as any}
-                    type="file"
-                    accept=".glb"
-                    style={{ display: "none" }}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) loadCustomGlb(file);
-                      e.target.value = "";
-                    }}
-                  />
-                </div>
-                {Object.keys(customTemplates).length > 0 && (
-                  <div className="controls-grid" style={{ marginTop: 8 }}>
-                    {Object.keys(customTemplates).map((name) => (
-                      <button
-                        key={name}
-                        className={`btn ${customBrush === name ? "active" : ""}`}
-                        onClick={() => {
-                          setCustomBrush(name);
-                          setObjectBrush("none");
-                        }}
-                      >
-                        {name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {Object.keys(customTemplates).length === 0 && <div className="hint">Carica un .glb per piazzarlo con click sinistro.</div>}
-                {customBrush && <div className="hint">Tasto destro: trascina per spostare, destro + Alt per scalare. Uno per cella per nome.</div>}
-              </div>
-            )}
-
-            <div>
-              <div className="section-title">Camera</div>
-              <div className="controls-grid">
-                <button className={`btn ${cameraMode === "iso" ? "active" : ""}`} onClick={() => setCameraMode("iso")}>
-                  Isometrica
-                </button>
-                <button className={`btn ${cameraMode === "top" ? "active" : ""}`} onClick={() => setCameraMode("top")}>
-                  Top-down
-                </button>
-              </div>
-            </div>
-
-            <div>
-              <div className="section-title">Texture</div>
-              <div className="stack">
-                <div className="stack">
-                  <div className="section-title">Pavimento (PNG/JPG)</div>
-                  <div className="small break-all">{texFloorUrl ?? "-"}</div>
-                  <div className="flex gap-6">
-                    <input type="file" accept="image/*" onChange={setFromFile(setTexFloorUrl)} />
-                    <button className="btn" onClick={() => clearUrl(texFloorUrl, setTexFloorUrl)}>
-                      Pulisci
-                    </button>
-                  </div>
-                </div>
-                <div className="stack">
-                  <div className="section-title">Acqua (PNG/JPG)</div>
-                  <div className="small break-all">{texWaterUrl ?? "-"}</div>
-                  <div className="flex gap-6">
-                    <input type="file" accept="image/*" onChange={setFromFile(setTexWaterUrl)} />
-                    <button className="btn" onClick={() => clearUrl(texWaterUrl, setTexWaterUrl)}>
-                      Pulisci
-                    </button>
-                  </div>
-                </div>
-                <div className="stack">
-                  <div className="section-title">Baratro (PNG/JPG)</div>
-                  <div className="small break-all">{texPitUrl ?? "-"}</div>
-                  <div className="flex gap-6">
-                    <input type="file" accept="image/*" onChange={setFromFile(setTexPitUrl)} />
-                    <button className="btn" onClick={() => clearUrl(texPitUrl, setTexPitUrl)}>
-                      Pulisci
-                    </button>
-                  </div>
-                </div>
-                <div className="controls-grid">
-                  <label className="text-xs">
-                    <div className="section-title">Ripetizione texture</div>
-                    <input type="range" min={1} max={6} step={1} value={texRepeat} onChange={(e) => setTexRepeat(Number(e.target.value))} />
-                    <div className="small">{texRepeat}x per cella</div>
-                  </label>
-                  <label className="text-xs">
-                    <div className="section-title">Opacita acqua</div>
-                    <input type="range" min={0.4} max={1} step={0.01} value={waterOpacity} onChange={(e) => setWaterOpacity(Number(e.target.value))} />
-                    <div className="small">{waterOpacity.toFixed(2)}</div>
-                  </label>
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <div className="section-title">Luci</div>
-              <div className="controls-grid">
-                <label className="text-xs">
-                  <div className="section-title">Ambiente (intensita)</div>
-                  <input type="range" min={0} max={0.8} step={0.01} value={ambient} onChange={(e) => setAmbient(Number(e.target.value))} />
-                </label>
-                <div className="text-xs">
-                  <div className="section-title">Colore ambiente</div>
-                  <div className="flex items-center gap-4">
-                    <input type="color" value={ambientColor} onChange={(e) => setAmbientColor(e.target.value)} />
-                    <input value={ambientColor} onChange={(e) => setAmbientColor(e.target.value)} />
-                  </div>
-                </div>
-                <div className="text-xs">
-                  <div className="section-title">Colore torcia (solo mesh)</div>
-                  <div className="flex items-center gap-4">
-                    <input type="color" value={torchColor} onChange={(e) => setTorchColor(e.target.value)} />
-                    <input value={torchColor} onChange={(e) => setTorchColor(e.target.value)} />
-                  </div>
-                </div>
-              </div>
-              <div className="section-title" style={{ marginTop: 8 }}>
-                Luci puntiformi piazzate
-              </div>
-              {lights.length === 0 && <div className="hint">Nessuna luce: scegli "Luce" e clicca una cella.</div>}
-              {lights.length > 0 && (
-                <div className="stack">
-                  {lights.map((l) => (
-                    <button
-                      key={l.idx}
-                      className={`btn ${selectedLightCell === l.idx ? "active" : ""}`}
-                      onClick={() => {
-                        setSelectedLightCell(l.idx);
-                        setEditingLight({ ...l.light });
-                      }}
-                    >
-                      Luce ({l.x + 1},{l.y + 1})
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {selectedLightCell !== null && editingLight && (
-                <div className="controls-grid">
-                  <label className="text-xs">
-                    <div className="section-title">Luce: intensita</div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={20}
-                      step={0.1}
-                      value={editingLight.intensity}
-                      onChange={(e) => updateSelectedLight({ intensity: Number(e.target.value) })}
-                    />
-                  </label>
-                  <label className="text-xs">
-                    <div className="section-title">Luce: distanza</div>
-                    <input
-                      type="range"
-                      min={1}
-                      max={8}
-                      step={0.1}
-                      value={editingLight.distance}
-                      onChange={(e) => updateSelectedLight({ distance: Number(e.target.value) })}
-                    />
-                  </label>
-                  <label className="text-xs">
-                    <div className="section-title">Luce: decay</div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={3}
-                      step={0.1}
-                      value={editingLight.decay}
-                      onChange={(e) => updateSelectedLight({ decay: Number(e.target.value) })}
-                    />
-                  </label>
-                  <div className="text-xs">
-                    <div className="section-title">Luce: colore</div>
-                    <div className="flex items-center gap-4">
-                      <input
-                        type="color"
-                        value={editingLight.color}
-                        onChange={(e) => updateSelectedLight({ color: e.target.value })}
-                      />
-                      <input
-                        value={editingLight.color}
-                        onChange={(e) => updateSelectedLight({ color: e.target.value })}
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-              {customObjects.length > 0 && (
-                <div>
-                  <div className="section-title" style={{ marginTop: 8 }}>
-                    Oggetti piazzati
-                  </div>
-                  <div className="stack">
-                    {customObjects.map((c) => (
-                      <button
-                        key={c.id}
-                        className={`btn ${selectedCustomId === c.id ? "active" : ""}`}
-                        onClick={() => setSelectedCustomId(c.id)}
-                      >
-                        {c.name} ({c.x + 1},{c.y + 1})
-                      </button>
-                    ))}
-                  </div>
-                  {selectedCustomId !== null && (
-                    <div className="controls-grid" style={{ marginTop: 6 }}>
-                      <label className="text-xs">
-                        <div className="section-title">Scala</div>
-                        <input
-                          type="range"
-                          min={0.3}
-                          max={3}
-                          step={0.05}
-                          value={customObjects.find((c) => c.id === selectedCustomId)?.scale ?? 1}
-                          onChange={(e) => updateSelectedCustom({ scale: Number(e.target.value) })}
-                        />
-                      </label>
-                      <label className="text-xs">
-                        <div className="section-title">Altezza (y)</div>
-                        <input
-                          type="range"
-                          min={-1}
-                          max={3}
-                          step={0.02}
-                          value={customObjects.find((c) => c.id === selectedCustomId)?.yOffset ?? 0}
-                          onChange={(e) => updateSelectedCustom({ yOffset: Number(e.target.value) })}
-                        />
-                      </label>
-                      <label className="text-xs">
-                        <div className="section-title">Rotazione (gradi)</div>
-                        <input
-                          type="range"
-                          min={0}
-                          max={359}
-                          step={1}
-                          value={customObjects.find((c) => c.id === selectedCustomId)?.rotation ?? 0}
-                          onChange={(e) => updateSelectedCustom({ rotation: Number(e.target.value) })}
-                        />
-                      </label>
-                    </div>
-                  )}
-                </div>
-              )}
-              <div className="controls-grid">
-                <label className="text-xs">
-                  <div className="section-title">Torcia: intensita (solo fiamma visiva)</div>
-                  <input type="range" min={0} max={20} step={0.1} value={torchIntensity} onChange={(e) => setTorchIntensity(Number(e.target.value))} />
-                </label>
-                <label className="text-xs">
-                  <div className="section-title">Torcia: distanza</div>
-                  <input type="range" min={1} max={8} step={0.1} value={torchDistance} onChange={(e) => setTorchDistance(Number(e.target.value))} />
-                </label>
-                <label className="text-xs">
-                  <div className="section-title">Torcia: decay</div>
-                  <input type="range" min={0} max={3} step={0.1} value={torchDecay} onChange={(e) => setTorchDecay(Number(e.target.value))} />
-                </label>
-              </div>
-            </div>
-
-            <div>
-              <div className="section-title">Export</div>
-              <div className="flex flex-wrap items-center gap-10">
-                <button className="btn active" onClick={exportPng}>
-                  PNG (print)
-                </button>
-                <button className="btn" onClick={exportJson}>
-                  Salva dungeon (JSON)
-                </button>
-                <button className="btn" onClick={() => importJsonRef.current?.click()}>
-                  Carica dungeon
-                </button>
-                <input
-                  ref={importJsonRef as any}
-                  type="file"
-                  accept="application/json"
-                  style={{ display: "none" }}
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) importJson(file);
-                    e.target.value = "";
-                  }}
-                />
-                <button className="btn" onClick={resetAll}>
-                  Reset
-                </button>
-                <div className="small" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <span>Render scale</span>
-                  <input style={{ width: 64 }} type="number" min={1} max={8} value={renderScale} onChange={(e) => setRenderScale(clamp(Number(e.target.value || 1), 1, 8))} />
-                </div>
-              </div>
-              {status && <div className="small">{status}</div>}
+            <div className="tree">
+              <GridPanel />
+              {mode === "cells" && <CellsPanel />}
+              {mode === "edges" && <EdgesPanel />}
+              {mode === "objects" && <ObjectsPanel />}
+              <CameraPanel />
+              <ExportPanel />
             </div>
           </div>
         </div>
@@ -2054,7 +2205,7 @@ function DungeonBoardEditorTrue3D() {
       <div className="panel viewport-wrap">
         <div className="flex items-center justify-between gap-3">
           <div className="section-title">Viewport 3D</div>
-          <div className="hint">Clic per editare. In iso: drag ruota, rotella zoom.</div>
+          <div className="hint">Clic per editare. In iso: drag SINISTRO ruota, rotella zoom.</div>
         </div>
         <div className="viewport">
           <div
