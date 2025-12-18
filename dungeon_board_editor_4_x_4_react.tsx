@@ -2,26 +2,21 @@ const { useEffect, useMemo, useRef, useState } = React;
 const THREE = window.THREE;
 
 /**
- * Dungeon Board Editor - TRUE 3D (No R3F / No Drei)
- *
- * This version removes react-three-fiber/drei to avoid runtime issues in some sandboxes.
- * It uses plain Three.js, managed from React via refs.
- *
- * Features:
- * - 4x4 grid
- * - Cells: floor / pit / water
- * - Edges: wall / door
- * - Objects: lever / trapdoor / torch / bridge
- * - Torches: real PointLight with selectable color
- * - Export PNG (uses renderer.domElement.toDataURL)
+ * Dungeon Board Editor - TRUE 3D (plain Three.js + React)
+ * - Griglia ridimensionabile
+ * - Celle: pavimento, baratro (pareti aperte), acqua animata con texture offset per cella
+ * - Bordi: muro/porta con texture opzionali
+ * - Oggetti: leva, botola, torcia (mesh + luce), ponte, scala per piani rialzati, luce puntiforme, erba animata, custom GLB
+ * - Texture personalizzabili (pavimento/acqua/baratro/muro/porta)
+ * - Export PNG e JSON (v3) con salvataggio impostazioni
  */
 
 const DEFAULT_GRID_W = 4;
 const DEFAULT_GRID_H = 4;
 
-type CellType = "floor" | "pit" | "water";
+type CellType = "floor" | "pit" | "water" | "raised";
 type EdgeType = "none" | "wall" | "door";
-type ObjType = "none" | "lever" | "trapdoor" | "torch" | "bridge" | "light" | "grass";
+type ObjType = "none" | "lever" | "trapdoor" | "torch" | "bridge" | "light" | "grass" | "stair";
 
 type ToolMode = "cells" | "edges" | "objects";
 
@@ -113,6 +108,7 @@ function DungeonBoardEditorTrue3D() {
   const [editingLight, setEditingLight] = useState<LightProps | null>(null);
 
   const [status, setStatus] = useState<string>("");
+  const statusTimerRef = useRef<number | null>(null);
 
   const [cameraMode, setCameraMode] = useState<"top" | "iso">("iso");
 
@@ -180,6 +176,8 @@ function DungeonBoardEditorTrue3D() {
   const halfW = (gridW * cellSize) / 2;
   const halfH = (gridH * cellSize) / 2;
 
+  const cellLabel = (t: CellType) => (t === "floor" ? "Pavimento" : t === "pit" ? "Baratro" : t === "water" ? "Acqua" : "Piano rialzato");
+
   function releaseTexture(url: string | null) {
     if (!url) return;
     const cached = texCacheRef.current[url];
@@ -210,6 +208,21 @@ function DungeonBoardEditorTrue3D() {
 
   const gltfLoaderRef = useRef<THREE.GLTFLoader | null>(null);
 
+  function flashStatus(message: string, duration = 1200) {
+    setStatus(message);
+    if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current);
+    statusTimerRef.current = window.setTimeout(() => {
+      setStatus("");
+      statusTimerRef.current = null;
+    }, duration);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (statusTimerRef.current) window.clearTimeout(statusTimerRef.current);
+    };
+  }, []);
+
   useEffect(() => {
     if (!gltfLoaderRef.current && (THREE as any).GLTFLoader) {
       gltfLoaderRef.current = new (THREE as any).GLTFLoader();
@@ -222,8 +235,7 @@ function DungeonBoardEditorTrue3D() {
     if (!loader && LoaderClass) loader = new LoaderClass();
     if (!loader) {
       console.error("GLTFLoader non trovato: assicurati che lo script sia caricato.");
-      setStatus("GLTFLoader non disponibile.");
-      setTimeout(() => setStatus(""), 1200);
+      flashStatus("GLTFLoader non disponibile.");
       return;
     }
     gltfLoaderRef.current = loader;
@@ -261,14 +273,12 @@ function DungeonBoardEditorTrue3D() {
         const name = file.name.replace(/\\.glb$/i, "");
         setCustomTemplates((prev) => ({ ...prev, [name]: scene }));
         setCustomBrush(name);
-        setStatus(`Caricato ${file.name}`);
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus(`Caricato ${file.name}`);
       },
       undefined,
       (err: any) => {
         console.error("Errore GLB", err);
-        setStatus(`Errore nel caricare ${file.name}`);
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus(`Errore nel caricare ${file.name}`);
       }
     );
   }
@@ -388,6 +398,8 @@ function DungeonBoardEditorTrue3D() {
 
     // Geometries
     const wallHeight = 0.5 * 2; // altezza raddoppiata
+    const raisedTop = 0.4; // altezza piano rialzato (quota della superficie superiore)
+    const raisedTileCenter = raisedTop - 0.07; // centro della mattonella rialzata
 
     const makeBeveledTile = () => {
       const size = cellSize * 0.9; // lascia più spazio tra le celle
@@ -420,6 +432,11 @@ function DungeonBoardEditorTrue3D() {
       return geo;
     };
 
+    const stairWidth = cellSize * 0.5;
+    const stairLength = cellSize * 0.5;
+    const stairStepHeight = raisedTop / 3;
+    const stairStepDepth = stairLength / 3;
+
     const geo = {
       tile: makeBeveledTile(),
       // Più segmenti per rendere l'ondulazione meno rigida
@@ -432,6 +449,7 @@ function DungeonBoardEditorTrue3D() {
       trap: new THREE.BoxGeometry(0.45, 0.06, 0.45),
       // Ponte più largo e lungo quanto la casella
       bridge: new THREE.BoxGeometry(cellSize, 0.08, 0.44),
+      stairStep: new THREE.BoxGeometry(stairWidth, stairStepHeight, stairStepDepth),
       torch: new THREE.BoxGeometry(0.08, 0.18, 0.08),
       flame: new THREE.SphereGeometry(0.06, 18, 18),
       // Triangolo per ciuffo d'erba (base a terra, punta in alto)
@@ -501,6 +519,7 @@ function DungeonBoardEditorTrue3D() {
 
     // Tiles (skip pits here, handled later as merged regions)
     const isPit = (x: number, y: number) => board.cells[idxCell(x, y, gridW)] === "pit";
+    const isRaised = (x: number, y: number) => board.cells[idxCell(x, y, gridW)] === "raised";
 
     for (let y = 0; y < gridH; y++) {
       for (let x = 0; x < gridW; x++) {
@@ -527,6 +546,59 @@ function DungeonBoardEditorTrue3D() {
           w.castShadow = true;
           w.receiveShadow = true;
           root.add(w);
+          continue;
+        }
+
+        if (type === "raised") {
+          const tileMat = floorMap ? cloneMatWithOffset(mats.floor, floorMap, x, y) : mats.floor;
+          const tile = new THREE.Mesh(geo.tile, tileMat);
+          tile.position.set(cx, raisedTileCenter, cz);
+          tile.castShadow = true;
+          tile.receiveShadow = true;
+          root.add(tile);
+
+          // Pareti verticali del piano rialzato (mostra solo i lati esposti)
+          const skirtH = raisedTop;
+          const skirtY = skirtH / 2;
+          const skirtT = 0.08;
+          const skirtL = cellSize * 0.9;
+          const skirtMat = mats.wall;
+
+          const neighborRaised = {
+            l: x > 0 && isRaised(x - 1, y),
+            r: x < gridW - 1 && isRaised(x + 1, y),
+            f: y > 0 && isRaised(x, y - 1),
+            b: y < gridH - 1 && isRaised(x, y + 1),
+          };
+
+          if (!neighborRaised.l) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(skirtT, skirtH, skirtL), skirtMat);
+            wall.position.set(cx - skirtL / 2 - skirtT / 2, skirtY, cz);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            root.add(wall);
+          }
+          if (!neighborRaised.r) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(skirtT, skirtH, skirtL), skirtMat);
+            wall.position.set(cx + skirtL / 2 + skirtT / 2, skirtY, cz);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            root.add(wall);
+          }
+          if (!neighborRaised.f) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(skirtL, skirtH, skirtT), skirtMat);
+            wall.position.set(cx, skirtY, cz - skirtL / 2 - skirtT / 2);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            root.add(wall);
+          }
+          if (!neighborRaised.b) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(skirtL, skirtH, skirtT), skirtMat);
+            wall.position.set(cx, skirtY, cz + skirtL / 2 + skirtT / 2);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            root.add(wall);
+          }
           continue;
         }
 
@@ -706,7 +778,12 @@ const buildDoor = () => {
         }
       });
       const halfHgt = (tpl as any).userData?.halfHeight ?? 0;
-      inst.position.set(c.x * cellSize - halfW + cellSize / 2, halfHgt + 0.02 + c.yOffset, c.y * cellSize - halfH + cellSize / 2);
+      const baseYOffset = isRaised(c.x, c.y) ? raisedTop - 0.14 : 0;
+      inst.position.set(
+        c.x * cellSize - halfW + cellSize / 2,
+        halfHgt + 0.02 + c.yOffset + baseYOffset,
+        c.y * cellSize - halfH + cellSize / 2
+      );
       inst.scale.setScalar(c.scale);
       inst.rotation.y = (c.rotation * Math.PI) / 180;
       inst.name = `custom-${c.id}`;
@@ -729,10 +806,11 @@ const buildDoor = () => {
         const cx = x * cellSize - halfW + cellSize / 2;
         const cz = y * cellSize - halfH + cellSize / 2;
         const rot = rotateY(obj.rotation);
+        const baseYOffset = board.cells[i] === "raised" ? raisedTop - 0.14 : 0;
 
         if (obj.type === "lever") {
           const g = new THREE.Group();
-          g.position.set(cx, 0.12, cz);
+          g.position.set(cx, 0.12 + baseYOffset, cz);
           g.rotation.y = rot;
 
           const rod = new THREE.Mesh(geo.leverRod, mats.lever);
@@ -748,7 +826,7 @@ const buildDoor = () => {
 
         if (obj.type === "trapdoor") {
           const m = new THREE.Mesh(geo.trap, mats.trapdoor);
-          m.position.set(cx, 0.13, cz);
+          m.position.set(cx, 0.13 + baseYOffset, cz);
           m.rotation.y = rot;
           m.castShadow = true;
           root.add(m);
@@ -757,10 +835,34 @@ const buildDoor = () => {
 
         if (obj.type === "bridge") {
           const m = new THREE.Mesh(geo.bridge, mats.bridge);
-          m.position.set(cx, 0.16, cz);
+          m.position.set(cx, 0.16 + baseYOffset, cz);
           m.rotation.y = rot;
           m.castShadow = true;
           root.add(m);
+          continue;
+        }
+
+        if (obj.type === "stair") {
+          const g = new THREE.Group();
+          for (let s = 0; s < 3; s++) {
+            const step = new THREE.Mesh(geo.stairStep, mats.bridge);
+            step.position.set(0, stairStepHeight / 2 + s * stairStepHeight, -stairLength / 2 + stairStepDepth / 2 + s * stairStepDepth);
+            step.castShadow = true;
+            step.receiveShadow = true;
+            g.add(step);
+          }
+          const dir =
+            obj.rotation === 0
+              ? { dx: 0, dz: 1 }
+              : obj.rotation === 90
+              ? { dx: 1, dz: 0 }
+              : obj.rotation === 180
+              ? { dx: 0, dz: -1 }
+              : { dx: -1, dz: 0 };
+          const offset = cellSize / 2 - stairLength / 2;
+          g.position.set(cx + dir.dx * offset, 0, cz + dir.dz * offset);
+          g.rotation.y = rot;
+          root.add(g);
           continue;
         }
 
@@ -790,7 +892,7 @@ const buildDoor = () => {
             const { u, v } = stableOffset(x * 37 + b * 11, y * 73 + b * 19);
             const spread = clamp(grassDecay, 0, 1);
             const range = spread; // 0..1 copre da centro fino ai bordi
-            blade.position.set(cx + (u - 0.5) * range, 0.22, cz + (v - 0.5) * range);
+            blade.position.set(cx + (u - 0.5) * range, 0.22 + baseYOffset, cz + (v - 0.5) * range);
             blade.rotation.y = (u * Math.PI * 2) % (Math.PI * 2);
             blade.castShadow = true;
             blade.receiveShadow = true;
@@ -802,7 +904,7 @@ const buildDoor = () => {
         if (obj.type === "torch") {
           hasTorch = true;
           const g = new THREE.Group();
-          g.position.set(cx, 0.22, cz);
+          g.position.set(cx, 0.22 + baseYOffset, cz);
           g.rotation.y = rot;
 
           const stick = new THREE.Mesh(geo.torch, mats.torch);
@@ -820,7 +922,7 @@ const buildDoor = () => {
         if (obj.type === "light" && obj.light) {
           hasLight = true;
           const l = new THREE.PointLight(toThreeColor(obj.light.color), obj.light.intensity, obj.light.distance, obj.light.decay);
-          l.position.set(cx, 0.6, cz);
+          l.position.set(cx, 0.6 + baseYOffset, cz);
           l.castShadow = true;
           root.add(l);
           continue;
@@ -1194,8 +1296,7 @@ const buildDoor = () => {
     // Placement / erase for custom GLB objects (when brush is custom + gomma attiva)
     if (mode === "objects" && pick.kind === "cell" && customBrush && objectBrush === "none") {
       if (!customTemplates[customBrush]) {
-        setStatus("Carica un oggetto prima di piazzarlo.");
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus("Carica un oggetto prima di piazzarlo.");
         return;
       }
       setCustomObjects((prev) => {
@@ -1227,12 +1328,7 @@ const buildDoor = () => {
 
         if (mode === "cells") {
           next.cells[i] = cellBrush;
-          setStatus(
-            `Cella (${pick.x + 1},${pick.y + 1}) = ${
-              cellBrush === "floor" ? "Pavimento" : cellBrush === "pit" ? "Baratro" : "Acqua"
-            }`
-          );
-          setTimeout(() => setStatus(""), 900);
+          flashStatus(`Cella (${pick.x + 1},${pick.y + 1}) = ${cellLabel(cellBrush)}`, 900);
           if (cellBrush === "floor" && next.objects[i]?.type === "bridge") next.objects[i] = { type: "none", rotation: 0 };
           return next;
         }
@@ -1254,10 +1350,43 @@ const buildDoor = () => {
           if (objectBrush === "bridge") {
             const base = next.cells[i];
             if (base !== "water" && base !== "pit") {
-              setStatus("Il ponte si puo piazzare solo su Acqua o Baratro.");
-              setTimeout(() => setStatus(""), 1400);
+              flashStatus("Il ponte si puo piazzare solo su Acqua o Baratro.", 1400);
               return prev;
             }
+          }
+
+          if (objectBrush === "stair") {
+            const base = prev.cells[i];
+            if (base === "water" || base === "pit" || base === "raised") {
+              flashStatus("La scala va su pavimento accanto a un piano rialzato.", 1400);
+              return prev;
+            }
+            if (next.objects[i].type === "stair") {
+              next.objects[i].rotation = ((next.objects[i].rotation + 90) % 360) as 0 | 90 | 180 | 270;
+              return next;
+            }
+            const dirs = [
+              { dx: 0, dy: 1, rot: 0 as 0 | 90 | 180 | 270 }, // sale verso sud
+              { dx: 0, dy: -1, rot: 180 as 0 | 90 | 180 | 270 }, // sale verso nord
+              { dx: 1, dy: 0, rot: 90 as 0 | 90 | 180 | 270 }, // sale verso est
+              { dx: -1, dy: 0, rot: 270 as 0 | 90 | 180 | 270 }, // sale verso ovest
+            ];
+            const neighbor = dirs.find(({ dx, dy }) => {
+              const nx = pick.x + dx;
+              const ny = pick.y + dy;
+              if (nx < 0 || ny < 0 || nx >= gridW || ny >= gridH) return false;
+              return prev.cells[idxCell(nx, ny, gridW)] === "raised";
+            });
+            if (!neighbor) {
+              flashStatus("Serve un piano rialzato adiacente per piazzare la scala.", 1500);
+              return prev;
+            }
+            next.objects[i] = { type: "stair", rotation: neighbor.rot };
+            if (selectedLightCell === i) {
+              setSelectedLightCell(null);
+              setEditingLight(null);
+            }
+            return next;
           }
 
           if (objectBrush === "none") {
@@ -1283,8 +1412,7 @@ const buildDoor = () => {
           }
           return next;
         }
-        setStatus("Sei in modalita Bordi: per dipingere Acqua/Baratro passa a 'Celle'.");
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus("Sei in modalita Bordi: per dipingere Acqua/Baratro passa a 'Celle'.");
         return prev;
       }
 
@@ -1310,8 +1438,7 @@ const buildDoor = () => {
     setSelectedCustomId(null);
     setSelectedLightCell(null);
     setEditingLight(null);
-    setStatus("Reset completato.");
-    setTimeout(() => setStatus(""), 1200);
+    flashStatus("Reset completato.");
   }
 
   function applyGridSize() {
@@ -1327,16 +1454,35 @@ const buildDoor = () => {
     setEditingLight(null);
     setGridW(w);
     setGridH(h);
-    setStatus(`Griglia impostata a ${w}x${h}.`);
-    setTimeout(() => setStatus(""), 1200);
+    flashStatus(`Griglia impostata a ${w}x${h}.`);
   }
 
   function exportJson() {
     const payload = {
-      version: 2,
+      version: 3,
       grid: { w: gridW, h: gridH },
       board,
       customObjects,
+      settings: {
+        ambient,
+        ambientColor,
+        torchColor,
+        torchIntensity,
+        torchDistance,
+        torchDecay,
+        waterOpacity,
+        texRepeat,
+        texFloorUrl,
+        texWaterUrl,
+        texPitUrl,
+        texWallUrl,
+        texDoorUrl,
+        grassColor,
+        grassDensity,
+        grassDecay,
+        renderScale,
+        cameraMode,
+      },
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1376,6 +1522,42 @@ const buildDoor = () => {
         setGridH(fileH);
         setBoard(nextBoard);
 
+        // Settings (versioned)
+        const settings = data.settings ?? {};
+        const numOr = (v: any, fallback: number) => (typeof v === "number" && !Number.isNaN(v) ? v : fallback);
+        const strOr = (v: any, fallback: string) => (typeof v === "string" ? v : fallback);
+
+        setAmbient(numOr(settings.ambient ?? data.ambient, ambient));
+        setAmbientColor(strOr(settings.ambientColor ?? data.ambientColor, ambientColor));
+        setTorchColor(strOr(settings.torchColor ?? data.torchColor, torchColor));
+        setTorchIntensity(numOr(settings.torchIntensity ?? data.torchIntensity, torchIntensity));
+        setTorchDistance(numOr(settings.torchDistance ?? data.torchDistance, torchDistance));
+        setTorchDecay(numOr(settings.torchDecay ?? data.torchDecay, torchDecay));
+        setWaterOpacity(numOr(settings.waterOpacity ?? data.waterOpacity, waterOpacity));
+        setTexRepeat(numOr(settings.texRepeat ?? data.texRepeat, texRepeat));
+        setGrassColor(strOr(settings.grassColor ?? data.grassColor, grassColor));
+        setGrassDensity(numOr(settings.grassDensity ?? data.grassDensity, grassDensity));
+        setGrassDecay(numOr(settings.grassDecay ?? data.grassDecay, grassDecay));
+        setRenderScale(numOr(settings.renderScale ?? data.renderScale, renderScale));
+        const cm = settings.cameraMode ?? data.cameraMode;
+        if (cm === "top" || cm === "iso") setCameraMode(cm);
+
+        const setUrl = (nextUrl: any, current: string | null, setter: (url: string | null) => void) => {
+          if (nextUrl === null) {
+            if (current) releaseTexture(current);
+            setter(null);
+            return;
+          }
+          if (typeof nextUrl !== "string" || !nextUrl.length) return;
+          if (current && current !== nextUrl) releaseTexture(current);
+          setter(nextUrl);
+        };
+        setUrl(settings.texFloorUrl ?? data.texFloorUrl, texFloorUrl, setTexFloorUrl);
+        setUrl(settings.texWaterUrl ?? data.texWaterUrl, texWaterUrl, setTexWaterUrl);
+        setUrl(settings.texPitUrl ?? data.texPitUrl, texPitUrl, setTexPitUrl);
+        setUrl(settings.texWallUrl ?? data.texWallUrl, texWallUrl, setTexWallUrl);
+        setUrl(settings.texDoorUrl ?? data.texDoorUrl, texDoorUrl, setTexDoorUrl);
+
         if (Array.isArray(data.customObjects)) {
           setCustomObjects(
             data.customObjects
@@ -1391,16 +1573,16 @@ const buildDoor = () => {
                 rotation: typeof c.rotation === "number" ? c.rotation : 0,
               }))
           );
+        } else {
+          setCustomObjects([]);
         }
         setSelectedLightCell(null);
         setEditingLight(null);
         setSelectedCustomId(null);
-        setStatus("Dungeon caricato.");
-        setTimeout(() => setStatus(""), 1200);
+        flashStatus("Dungeon caricato.");
       } catch (err) {
         console.error(err);
-        setStatus("Errore nel caricare il JSON.");
-        setTimeout(() => setStatus(""), 1500);
+        flashStatus("Errore nel caricare il JSON.", 1500);
       }
     };
     reader.readAsText(file);
@@ -1452,6 +1634,8 @@ const buildDoor = () => {
       x: idx % gridW,
       y: Math.floor(idx / gridW),
     }));
+
+  const selectedCustom = customObjects.find((c) => c.id === selectedCustomId);
 
   useEffect(() => {
     // Se la luce selezionata viene cancellata o cambiata, azzera selezione
@@ -1518,9 +1702,9 @@ const buildDoor = () => {
         <div>
           <div className="section-title">Pennello cella</div>
           <div className="controls-grid">
-            {(["floor", "pit", "water"] as CellType[]).map((t) => (
+            {(["floor", "pit", "water", "raised"] as CellType[]).map((t) => (
               <button key={t} className={`btn ${cellBrush === t ? "active" : ""}`} onClick={() => setCellBrush(t)}>
-                {t === "floor" ? "Pavimento" : t === "pit" ? "Baratro" : "Acqua"}
+                {cellLabel(t)}
               </button>
             ))}
           </div>
@@ -1644,7 +1828,7 @@ const buildDoor = () => {
         <div className="tree-node">
           <div className="tree-label">Pennello base</div>
           <div className="controls-grid">
-            {(["lever", "trapdoor", "torch", "bridge", "light", "grass"] as const).map((t) => (
+            {(["lever", "trapdoor", "torch", "bridge", "stair", "light", "grass"] as const).map((t) => (
               <button key={t} className={`btn ${objectBrush === t ? "active" : ""}`} onClick={() => setObjectBrush(t)}>
                 {t === "lever"
                   ? "Leva"
@@ -1654,6 +1838,8 @@ const buildDoor = () => {
                   ? "Torcia"
                   : t === "bridge"
                   ? "Ponte"
+                  : t === "stair"
+                  ? "Scala"
                   : t === "light"
                   ? "Luce"
                   : "Erba"}
@@ -1663,7 +1849,7 @@ const buildDoor = () => {
               Gomma
             </button>
           </div>
-          <div className="hint">Ponte solo su Acqua/Baratro. Riclic per ruotare. Le luci sono punti luce. L'erba ha colore impostabile.</div>
+          <div className="hint">Ponte solo su Acqua/Baratro. Scala solo accanto a un piano rialzato (ruota con riclic). Luci = punti luce. L'erba ha colore impostabile.</div>
           {objectBrush === "grass" && (
             <div className="stack" style={{ marginTop: 6 }}>
               <div className="flex items-center gap-4">
@@ -1898,15 +2084,14 @@ const buildDoor = () => {
               <div className="controls-grid" style={{ marginTop: 6 }}>
                 <label className="text-xs">
                   <div className="section-title">Scala</div>
-                <input
-                  type="range"
-                  min={0.3}
-                  max={3}
-                  step={0.05}
-                  value={customObjects.find((c) => c.id === selectedCustomId)?.scale ?? 1}
-                  onChange={(e) => updateSelectedCustom({ scale: Number(e.target.value) })}
-                  
-                />
+                  <input
+                    type="range"
+                    min={0.3}
+                    max={3}
+                    step={0.05}
+                    value={selectedCustom?.scale ?? 1}
+                    onChange={(e) => updateSelectedCustom({ scale: Number(e.target.value) })}
+                  />
                 </label>
                 <label className="text-xs">
                   <div className="section-title">Altezza (y)</div>
@@ -1915,9 +2100,8 @@ const buildDoor = () => {
                     min={-1}
                     max={3}
                     step={0.02}
-                    value={customObjects.find((c) => c.id === selectedCustomId)?.yOffset ?? 0}
+                    value={selectedCustom?.yOffset ?? 0}
                     onChange={(e) => updateSelectedCustom({ yOffset: Number(e.target.value) })}
-                    
                   />
                 </label>
                 <label className="text-xs">
@@ -1927,9 +2111,8 @@ const buildDoor = () => {
                     min={0}
                     max={359}
                     step={1}
-                    value={customObjects.find((c) => c.id === selectedCustomId)?.rotation ?? 0}
+                    value={selectedCustom?.rotation ?? 0}
                     onChange={(e) => updateSelectedCustom({ rotation: Number(e.target.value) })}
-                    
                   />
                 </label>
               </div>
