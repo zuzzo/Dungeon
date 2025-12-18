@@ -21,12 +21,12 @@ const DEFAULT_GRID_H = 4;
 
 type CellType = "floor" | "pit" | "water";
 type EdgeType = "none" | "wall" | "door";
-type ObjType = "none" | "lever" | "trapdoor" | "torch" | "bridge" | "light";
+type ObjType = "none" | "lever" | "trapdoor" | "torch" | "bridge" | "light" | "grass";
 
 type ToolMode = "cells" | "edges" | "objects";
 
 type LightProps = { color: string; intensity: number; distance: number; decay: number };
-type ObjectPlacement = { type: ObjType; rotation: 0 | 90 | 180 | 270; light?: LightProps };
+type ObjectPlacement = { type: ObjType; rotation: 0 | 90 | 180 | 270; light?: LightProps; grassColor?: string };
 type CustomPlacement = { id: number; name: string; url: string; x: number; y: number; scale: number; yOffset: number; rotation: number };
 
 type BoardState = {
@@ -122,6 +122,9 @@ function DungeonBoardEditorTrue3D() {
   const [torchIntensity, setTorchIntensity] = useState(7.5);
   const [torchDistance, setTorchDistance] = useState(3.2);
   const [torchDecay, setTorchDecay] = useState(2.0);
+  const [grassColor, setGrassColor] = useState("#4fa64f");
+  const [grassDensity, setGrassDensity] = useState(6);
+  const [grassDecay, setGrassDecay] = useState(1); // inteso come copertura (0-1) della cella
 
   const [texFloorUrl, setTexFloorUrl] = useState<string | null>(null);
   const [texWaterUrl, setTexWaterUrl] = useState<string | null>(null);
@@ -165,7 +168,7 @@ function DungeonBoardEditorTrue3D() {
     lastY: 0,
     yaw: Math.PI * 0.25,
     pitch: Math.PI * 0.28,
-    dist: 9,
+    dist: 6.5,
   });
 
   useEffect(() => {
@@ -338,8 +341,9 @@ function DungeonBoardEditorTrue3D() {
       pit: new THREE.MeshStandardMaterial(
         pitMap
           ? { color: 0xffffff, roughness: 1.0, metalness: 0.0, map: pitMap, side: THREE.DoubleSide }
-          : { color: 0xffffff, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide }
+          : { color: 0x111111, roughness: 1.0, metalness: 0.0, side: THREE.DoubleSide }
       ),
+      grass: new THREE.MeshStandardMaterial({ color: 0x4fa64f, roughness: 0.85, metalness: 0.0, side: THREE.DoubleSide }),
       wall: new THREE.MeshStandardMaterial(
         wallMap
           ? { color: 0xffffff, roughness: 0.85, metalness: 0.0, map: wallMap }
@@ -361,7 +365,7 @@ function DungeonBoardEditorTrue3D() {
         emissive: 0xff9a2e,
         emissiveIntensity: 0.7,
       }),
-    } as const;
+      } as const;
 
     const cloneMatWithOffset = (base: THREE.Material, map: THREE.Texture | null, x: number, y: number) => {
       const mat = base.clone() as any;
@@ -430,6 +434,25 @@ function DungeonBoardEditorTrue3D() {
       bridge: new THREE.BoxGeometry(cellSize, 0.08, 0.44),
       torch: new THREE.BoxGeometry(0.08, 0.18, 0.08),
       flame: new THREE.SphereGeometry(0.06, 18, 18),
+      // Triangolo per ciuffo d'erba (base a terra, punta in alto)
+      grassBlade: (() => {
+        const geo = new THREE.BufferGeometry();
+        const verts = new Float32Array([
+          -0.04, 0, 0, // base sinistra
+          0.04, 0, 0, // base destra
+          0, 0.22, 0, // punta
+        ]);
+        const uvs = new Float32Array([
+          0, 0,
+          1, 0,
+          0.5, 1,
+        ]);
+        geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+        geo.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+        geo.setIndex([0, 1, 2]);
+        geo.computeVertexNormals();
+        return geo;
+      })(),
     } as const;
 
     // Groups
@@ -455,20 +478,26 @@ function DungeonBoardEditorTrue3D() {
     base.visible = false; // evita di vedere un piano grigio tra pavimento e baratro
     root.add(base);
 
-    // Grid lines (visual separation between cells)
-    const grid = new THREE.GridHelper(gridW * cellSize, gridW, 0x000000, 0x000000);
-    grid.name = "GRID";
-    grid.position.set(0, 0.151, 0); // slightly above tile tops
-    // @ts-ignore
-    if (grid.material) {
-      // @ts-ignore
-      grid.material.transparent = true;
-      // @ts-ignore
-      grid.material.opacity = 0.6;
-      // @ts-ignore
-      grid.material.depthWrite = false;
+    // Grid lines (visual separation between cells) senza sfalsamenti anche se W≠H
+    const gridLines = new THREE.Group();
+    const lineMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false });
+    const lineY = 0.151;
+    for (let ix = 0; ix <= gridW; ix++) {
+      const xPos = ix * cellSize - halfW;
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.Float32BufferAttribute([xPos, lineY, -halfH, xPos, lineY, halfH], 3));
+      const line = new THREE.LineSegments(geom, lineMat);
+      gridLines.add(line);
     }
-    root.add(grid);
+    for (let iz = 0; iz <= gridH; iz++) {
+      const zPos = iz * cellSize - halfH;
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.Float32BufferAttribute([-halfW, lineY, zPos, halfW, lineY, zPos], 3));
+      const line = new THREE.LineSegments(geom, lineMat);
+      gridLines.add(line);
+    }
+    gridLines.name = "GRID_LINES";
+    root.add(gridLines);
 
     // Tiles (skip pits here, handled later as merged regions)
     const isPit = (x: number, y: number) => board.cells[idxCell(x, y, gridW)] === "pit";
@@ -483,8 +512,17 @@ function DungeonBoardEditorTrue3D() {
 
         if (type === "water") {
           // Acqua: la cella e piena d'acqua (niente pavimento sotto visibile).
-          const wMat = waterMap ? cloneMatWithOffset(mats.water, waterMap, x, y) : mats.water;
-          const w = new THREE.Mesh(geo.water, wMat);
+          const wGeo = geo.water.clone();
+          if (waterMap) {
+            const { u, v } = stableOffset(x, y);
+            const uv = wGeo.attributes.uv as THREE.BufferAttribute;
+            for (let i = 0; i < uv.count; i++) {
+              uv.setX(i, uv.getX(i) + u);
+              uv.setY(i, uv.getY(i) + v);
+            }
+            uv.needsUpdate = true;
+          }
+          const w = new THREE.Mesh(wGeo, mats.water);
           w.position.set(cx, 0.05, cz);
           w.castShadow = true;
           w.receiveShadow = true;
@@ -501,103 +539,78 @@ function DungeonBoardEditorTrue3D() {
       }
     }
 
-    // Merge pit regions into tapered frustums
-    const visited = Array(gridW * gridH).fill(false);
+        // Pit per cella: cavita aperte con pareti solo dove serve (nessun riempimento dei buchi a L)
     const pitHeight = 0.34;
-    const bottomTaper = 0.6; // base più stretta
-    const topInset = 0.92; // leggera incassatura visibile dall'alto
+    const bottomTaper = 0.6;
+    const topInset = 0.92;
     const topDrop = 0.015;
 
-    const neighbors = [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ];
-
-    const pitRegions: { minX: number; maxX: number; minY: number; maxY: number }[] = [];
+    function makePitCellGeometry(hasL: boolean, hasR: boolean, hasF: boolean, hasB: boolean) {
+      const h = pitHeight / 2;
+      const b = 0.5 * bottomTaper;
+      const topY = h - topDrop;
+      // Per-lato inset: se c'è un vicino, niente inset (1), altrimenti topInset
+      const insetL = hasL ? 1 : topInset;
+      const insetR = hasR ? 1 : topInset;
+      const insetF = hasF ? 1 : topInset;
+      const insetB = hasB ? 1 : topInset;
+      const verts = [
+        -0.5 * insetL, topY, -0.5 * insetF, // 0 top front-left
+        0.5 * insetR, topY, -0.5 * insetF,  // 1 top front-right
+        0.5 * insetR, topY, 0.5 * insetB,   // 2 top back-right
+        -0.5 * insetL, topY, 0.5 * insetB,  // 3 top back-left
+        -b, -h, -b, // 4 bottom FL
+        b, -h, -b,  // 5 bottom FR
+        b, -h, b,   // 6 bottom BR
+        -b, -h, b,  // 7 bottom BL
+      ];
+      const faces: number[] = [];
+      const uvs: number[] = [];
+      const pushFace = (a: number, b: number, c: number, d: number, faceUV: number[]) => {
+        faces.push(a, b, c, a, c, d);
+        uvs.push(
+          faceUV[0], faceUV[1],
+          faceUV[2], faceUV[3],
+          faceUV[4], faceUV[5],
+          faceUV[0], faceUV[1],
+          faceUV[4], faceUV[5],
+          faceUV[6], faceUV[7],
+        );
+      };
+      // bottom
+      pushFace(4, 5, 6, 7, [0, 0, 1, 0, 1, 1, 0, 1]);
+      // sides: manteniamo sempre le pareti; con inset a 1 quando c'Ã¨ un vicino si allineano senza buchi
+      pushFace(0, 1, 5, 4, [0, 0, 1, 0, 1, 1, 0, 1]);
+      pushFace(1, 2, 6, 5, [0, 0, 1, 0, 1, 1, 0, 1]);
+      pushFace(2, 3, 7, 6, [0, 0, 1, 0, 1, 1, 0, 1]);
+      pushFace(3, 0, 4, 7, [0, 0, 1, 0, 1, 1, 0, 1]);
+      const geom = new THREE.BufferGeometry();
+      geom.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+      geom.setIndex(faces);
+      geom.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+      geom.computeVertexNormals();
+      return geom;
+    }
 
     for (let y = 0; y < gridH; y++) {
       for (let x = 0; x < gridW; x++) {
-        const idx = idxCell(x, y, gridW);
-        if (visited[idx] || !isPit(x, y)) continue;
-        // BFS to find contiguous pit region
-        let minX = x,
-          maxX = x,
-          minY = y,
-          maxY = y;
-        const queue: [number, number][] = [[x, y]];
-        visited[idx] = true;
-        while (queue.length) {
-          const [cx, cy] = queue.shift()!;
-          for (const [dx, dy] of neighbors) {
-            const nx = cx + dx;
-            const ny = cy + dy;
-            if (nx < 0 || nx >= gridW || ny < 0 || ny >= gridH) continue;
-            const nIdx = idxCell(nx, ny, gridW);
-            if (visited[nIdx] || !isPit(nx, ny)) continue;
-            visited[nIdx] = true;
-            queue.push([nx, ny]);
-            minX = Math.min(minX, nx);
-            maxX = Math.max(maxX, nx);
-            minY = Math.min(minY, ny);
-            maxY = Math.max(maxY, ny);
-          }
-        }
-        pitRegions.push({ minX, maxX, minY, maxY });
+        if (!isPit(x, y)) continue;
+        const hasL = isPit(x - 1, y);
+        const hasR = isPit(x + 1, y);
+        const hasF = isPit(x, y - 1);
+        const hasB = isPit(x, y + 1);
+        const geom = makePitCellGeometry(hasL, hasR, hasF, hasB);
+        const pit = new THREE.Mesh(geom, mats.pit);
+        const cx = x * cellSize - halfW + cellSize / 2;
+        const cz = y * cellSize - halfH + cellSize / 2;
+        pit.position.set(cx, -pitHeight / 2, cz);
+        pit.castShadow = true;
+        pit.receiveShadow = true;
+        root.add(pit);
       }
     }
 
-    for (const region of pitRegions) {
-      const wCells = region.maxX - region.minX + 1;
-      const hCells = region.maxY - region.minY + 1;
-      const width = wCells * cellSize;
-      const depth = hCells * cellSize;
-      const geom = new THREE.BoxGeometry(width, pitHeight, depth, 1, 1, 1);
-      // Rimuovi il top cap per lasciare aperto il baratro
-      const idx = geom.getIndex();
-      if (idx) {
-        const pos = geom.attributes.position as THREE.BufferAttribute;
-        const keep: number[] = [];
-        for (let i = 0; i < idx.count; i += 3) {
-          const a = idx.getX(i);
-          const b = idx.getX(i + 1);
-          const c = idx.getX(i + 2);
-          const ya = pos.getY(a);
-          const yb = pos.getY(b);
-          const yc = pos.getY(c);
-          // scarta solo i triangoli completamente sul top (y >= 0)
-          if (ya >= 0 && yb >= 0 && yc >= 0) continue;
-          keep.push(a, b, c);
-        }
-        geom.setIndex(keep);
-      }
-      const pos = geom.attributes.position as THREE.BufferAttribute;
-      for (let i = 0; i < pos.count; i++) {
-        const y = pos.getY(i);
-        const x = pos.getX(i);
-        const z = pos.getZ(i);
-        if (y < 0) {
-          pos.setX(i, x * bottomTaper);
-          pos.setZ(i, z * bottomTaper);
-        } else if (y > 0) {
-          pos.setX(i, x * topInset);
-          pos.setZ(i, z * topInset);
-          pos.setY(i, y - topDrop);
-        }
-      }
-      pos.needsUpdate = true;
-      geom.computeVertexNormals();
-      const pit = new THREE.Mesh(geom, mats.pit);
-      const centerX = (region.minX + region.maxX + 1) * 0.5 * cellSize - halfW;
-      const centerZ = (region.minY + region.maxY + 1) * 0.5 * cellSize - halfH;
-      pit.position.set(centerX, -pitHeight / 2, centerZ);
-      pit.castShadow = true;
-      pit.receiveShadow = true;
-      root.add(pit);
-    }
-
-    const buildDoor = () => {
+const buildDoor = () => {
       const gap = cellSize / 5; // luce dell'apertura
       const postThickness = (cellSize - gap) / 2;
       const depth = 0.16; // spessore raddoppiato
@@ -705,6 +718,7 @@ function DungeonBoardEditorTrue3D() {
     const torchLightColor = toThreeColor(torchColor);
     let hasTorch = false;
     let hasLight = false;
+    const grassRoot = new THREE.Group();
 
     for (let y = 0; y < gridH; y++) {
       for (let x = 0; x < gridW; x++) {
@@ -750,6 +764,41 @@ function DungeonBoardEditorTrue3D() {
           continue;
         }
 
+        if (obj.type === "grass") {
+          const blades = Math.max(1, Math.round(grassDensity));
+          for (let b = 0; b < blades; b++) {
+            const blade = new THREE.Mesh(geo.grassBlade, mats.grass.clone());
+            const col = new THREE.Color(obj.grassColor ?? grassColor);
+            (blade.material as THREE.MeshStandardMaterial).color.copy(col);
+            (blade.material as THREE.MeshStandardMaterial).onBeforeCompile = (shader) => {
+              shader.uniforms.time = waterUniformsRef.current.time;
+              shader.vertexShader = shader.vertexShader.replace(
+                "void main() {",
+                /* glsl */ `
+                uniform float time;
+                void main() {`
+              );
+              shader.vertexShader = shader.vertexShader.replace(
+                "#include <begin_vertex>",
+                /* glsl */ `
+                #include <begin_vertex>
+                float sway = sin((position.y * 5.0 + position.x * 6.0 + position.z * 6.0) + time * 1.6) * 0.02;
+                transformed.x += sway;
+              `
+              );
+            };
+            const { u, v } = stableOffset(x * 37 + b * 11, y * 73 + b * 19);
+            const spread = clamp(grassDecay, 0, 1);
+            const range = spread; // 0..1 copre da centro fino ai bordi
+            blade.position.set(cx + (u - 0.5) * range, 0.22, cz + (v - 0.5) * range);
+            blade.rotation.y = (u * Math.PI * 2) % (Math.PI * 2);
+            blade.castShadow = true;
+            blade.receiveShadow = true;
+            grassRoot.add(blade);
+          }
+          continue;
+        }
+
         if (obj.type === "torch") {
           hasTorch = true;
           const g = new THREE.Group();
@@ -778,11 +827,12 @@ function DungeonBoardEditorTrue3D() {
         }
       }
     }
+    root.add(grassRoot);
 
     root.add(customRoot);
 
     return { root, pickPlane, hasTorch, hasLight, customRoot };
-  }, [board, halfH, halfW, gridW, gridH, torchColor, torchDecay, torchDistance, torchIntensity, texFloorUrl, texWaterUrl, texPitUrl, texWallUrl, texDoorUrl, texRepeat, waterOpacity, customObjects, customTemplates]);
+  }, [board, halfH, halfW, gridW, gridH, torchColor, torchDecay, torchDistance, torchIntensity, texFloorUrl, texWaterUrl, texPitUrl, texWallUrl, texDoorUrl, texRepeat, waterOpacity, grassColor, grassDensity, grassDecay, customObjects, customTemplates]);
 
   // Initialize renderer + scene once
   useEffect(() => {
@@ -879,16 +929,24 @@ function DungeonBoardEditorTrue3D() {
       orbitRef.current.isDown = false;
     };
     const onWheel = (ev: WheelEvent) => {
-      if (cameraMode !== "iso") return;
+      ev.preventDefault();
       const o = orbitRef.current;
-      o.dist = clamp(o.dist + ev.deltaY * 0.01, 4.5, 18);
+      const factor = Math.exp(ev.deltaY * 0.003); // moltiplicativo piu sensibile
+      if (cameraMode === "iso") {
+        o.dist = clamp(o.dist * factor, 0.8, 40); // piu vicino/lontano
+      } else if (cameraMode === "top" && (cameraRef.current as any)?.isOrthographicCamera) {
+        const oc = cameraRef.current as THREE.OrthographicCamera;
+        const zoom = clamp(oc.zoom / factor, 0.1, 8); // inverti per zoom in/out coerente
+        oc.zoom = zoom;
+        oc.updateProjectionMatrix();
+      }
     };
 
     window.addEventListener("resize", resize);
     renderer.domElement.addEventListener("mousedown", onDown);
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-    renderer.domElement.addEventListener("wheel", onWheel, { passive: true });
+    renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
 
     resize();
     animate();
@@ -925,7 +983,7 @@ function DungeonBoardEditorTrue3D() {
 
     if (cameraMode === "top") {
       const aspect = host.clientWidth / host.clientHeight;
-      const frustum = 3.2;
+      const frustum = 3.2 / 1.5; // vista top piu ravvicinata (~1.5x piu grande)
       cam = new THREE.OrthographicCamera(-frustum * aspect, frustum * aspect, frustum, -frustum, 0.1, 100);
       cam.position.set(0, 8, 0.001);
       cam.up.set(0, 0, -1);
@@ -949,7 +1007,7 @@ function DungeonBoardEditorTrue3D() {
     } else {
       const oc = cam as THREE.OrthographicCamera;
       const aspect = w / h;
-      const frustum = 3.2;
+      const frustum = 3.2 / 1.5; // mantiene la vista top piu grande (~1.5x)
       oc.left = -frustum * aspect;
       oc.right = frustum * aspect;
       oc.top = frustum;
@@ -1107,6 +1165,7 @@ function DungeonBoardEditorTrue3D() {
   function handleCustomDrag(ev: React.MouseEvent) {
     const st = dragStateRef.current;
     if (!st || st.id === null) return;
+    if ((ev.buttons & 2) === 0) return; // solo tasto destro durante il drag
     if (st.mode === "move") {
       const cell = getCellFromMouse(ev);
       if (!cell) return;
@@ -1210,12 +1269,13 @@ function DungeonBoardEditorTrue3D() {
             return next;
           }
 
-          if (next.objects[i].type === objectBrush) {
+          if (next.objects[i].type === objectBrush && objectBrush !== "grass") {
             next.objects[i].rotation = ((next.objects[i].rotation + 90) % 360) as 0 | 90 | 180 | 270;
           } else {
-            next.objects[i].type = objectBrush;
-            next.objects[i].rotation = 0;
-            next.objects[i].light = undefined;
+            next.objects[i] = { type: objectBrush, rotation: 0 };
+            if (objectBrush === "grass") {
+              next.objects[i].grassColor = grassColor;
+            }
             if (selectedLightCell === i) {
               setSelectedLightCell(null);
               setEditingLight(null);
@@ -1584,16 +1644,59 @@ function DungeonBoardEditorTrue3D() {
         <div className="tree-node">
           <div className="tree-label">Pennello base</div>
           <div className="controls-grid">
-            {(["lever", "trapdoor", "torch", "bridge", "light"] as const).map((t) => (
+            {(["lever", "trapdoor", "torch", "bridge", "light", "grass"] as const).map((t) => (
               <button key={t} className={`btn ${objectBrush === t ? "active" : ""}`} onClick={() => setObjectBrush(t)}>
-                {t === "lever" ? "Leva" : t === "trapdoor" ? "Botola" : t === "torch" ? "Torcia" : t === "bridge" ? "Ponte" : "Luce"}
+                {t === "lever"
+                  ? "Leva"
+                  : t === "trapdoor"
+                  ? "Botola"
+                  : t === "torch"
+                  ? "Torcia"
+                  : t === "bridge"
+                  ? "Ponte"
+                  : t === "light"
+                  ? "Luce"
+                  : "Erba"}
               </button>
             ))}
             <button className={`btn ${objectBrush === "none" ? "active" : ""}`} onClick={() => setObjectBrush("none")}>
               Gomma
             </button>
           </div>
-          <div className="hint">Ponte solo su Acqua/Baratro. Riclic per ruotare. Le luci sono punti luce.</div>
+          <div className="hint">Ponte solo su Acqua/Baratro. Riclic per ruotare. Le luci sono punti luce. L'erba ha colore impostabile.</div>
+          {objectBrush === "grass" && (
+            <div className="stack" style={{ marginTop: 6 }}>
+              <div className="flex items-center gap-4">
+                <span className="text-xs">Colore erba</span>
+                <input type="color" value={grassColor} onChange={(e) => setGrassColor(e.target.value)} />
+                <input value={grassColor} onChange={(e) => setGrassColor(e.target.value)} />
+              </div>
+              <label className="text-xs">
+                <div className="section-title">Densita ciuffi</div>
+                <input
+                  type="range"
+                  min={1}
+                  max={20}
+                  step={1}
+                  value={grassDensity}
+                  onChange={(e) => setGrassDensity(Number(e.target.value))}
+                />
+                <div className="small">{grassDensity} per cella</div>
+              </label>
+              <label className="text-xs">
+                <div className="section-title">Copertura erba (0-1)</div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={grassDecay}
+                  onChange={(e) => setGrassDecay(Number(e.target.value))}
+                />
+                <div className="small">{grassDecay.toFixed(2)} della cella</div>
+              </label>
+            </div>
+          )}
         </div>
 
         <div className="tree-node">
