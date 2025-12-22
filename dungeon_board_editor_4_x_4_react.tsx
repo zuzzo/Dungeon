@@ -175,6 +175,16 @@ function DungeonBoardEditorTrue3D() {
   const cellSize = 1;
   const halfW = (gridW * cellSize) / 2;
   const halfH = (gridH * cellSize) / 2;
+  const topFitRef = useRef({ halfW, halfH, cellSize });
+  const getTopFrustum = (aspect: number) => {
+    const { halfW: fitHalfW, halfH: fitHalfH, cellSize: fitCell } = topFitRef.current;
+    const padding = fitCell * 0.2;
+    return Math.max(fitHalfH, fitHalfW / Math.max(0.01, aspect)) + padding;
+  };
+
+  useEffect(() => {
+    topFitRef.current = { halfW, halfH, cellSize };
+  }, [halfW, halfH, cellSize]);
 
   const cellLabel = (t: CellType) => (t === "floor" ? "Pavimento" : t === "pit" ? "Baratro" : t === "water" ? "Acqua" : "Piano rialzato");
 
@@ -550,7 +560,10 @@ function DungeonBoardEditorTrue3D() {
         }
 
         if (type === "raised") {
-          const tileMat = floorMap ? cloneMatWithOffset(mats.floor, floorMap, x, y) : mats.floor;
+          const tileMat = floorMap ? cloneMatWithOffset(mats.floor, floorMap, x, y) : mats.floor.clone();
+          // Pavimento rialzato più scuro del 50% per differenziarlo
+          (tileMat as THREE.MeshStandardMaterial).color = ((tileMat as THREE.MeshStandardMaterial).color ?? new THREE.Color(0xffffff)).clone();
+          (tileMat as THREE.MeshStandardMaterial).color.multiplyScalar(0.5);
           const tile = new THREE.Mesh(geo.tile, tileMat);
           tile.position.set(cx, raisedTileCenter, cz);
           tile.castShadow = true;
@@ -844,8 +857,9 @@ const buildDoor = () => {
 
         if (obj.type === "stair") {
           const g = new THREE.Group();
+          const stairMat = floorMap ? cloneMatWithOffset(mats.floor, floorMap, x, y) : mats.floor;
           for (let s = 0; s < 3; s++) {
-            const step = new THREE.Mesh(geo.stairStep, mats.bridge);
+            const step = new THREE.Mesh(geo.stairStep, stairMat);
             step.position.set(0, stairStepHeight / 2 + s * stairStepHeight, -stairLength / 2 + stairStepDepth / 2 + s * stairStepDepth);
             step.castShadow = true;
             step.receiveShadow = true;
@@ -973,11 +987,12 @@ const buildDoor = () => {
       } else {
         const oc = c as THREE.OrthographicCamera;
         const aspect = w / h;
-        const frustum = 3.2;
+        const frustum = getTopFrustum(aspect);
         oc.left = -frustum * aspect;
         oc.right = frustum * aspect;
         oc.top = frustum;
         oc.bottom = -frustum;
+        oc.zoom = 1;
         oc.updateProjectionMatrix();
       }
     };
@@ -1036,11 +1051,6 @@ const buildDoor = () => {
       const factor = Math.exp(ev.deltaY * 0.003); // moltiplicativo piu sensibile
       if (cameraMode === "iso") {
         o.dist = clamp(o.dist * factor, 0.8, 40); // piu vicino/lontano
-      } else if (cameraMode === "top" && (cameraRef.current as any)?.isOrthographicCamera) {
-        const oc = cameraRef.current as THREE.OrthographicCamera;
-        const zoom = clamp(oc.zoom / factor, 0.1, 8); // inverti per zoom in/out coerente
-        oc.zoom = zoom;
-        oc.updateProjectionMatrix();
       }
     };
 
@@ -1085,7 +1095,7 @@ const buildDoor = () => {
 
     if (cameraMode === "top") {
       const aspect = host.clientWidth / host.clientHeight;
-      const frustum = 3.2 / 1.5; // vista top piu ravvicinata (~1.5x piu grande)
+      const frustum = getTopFrustum(aspect);
       cam = new THREE.OrthographicCamera(-frustum * aspect, frustum * aspect, frustum, -frustum, 0.1, 100);
       cam.position.set(0, 8, 0.001);
       cam.up.set(0, 0, -1);
@@ -1109,14 +1119,15 @@ const buildDoor = () => {
     } else {
       const oc = cam as THREE.OrthographicCamera;
       const aspect = w / h;
-      const frustum = 3.2 / 1.5; // mantiene la vista top piu grande (~1.5x)
+      const frustum = getTopFrustum(aspect);
       oc.left = -frustum * aspect;
       oc.right = frustum * aspect;
       oc.top = frustum;
       oc.bottom = -frustum;
+      oc.zoom = 1;
       oc.updateProjectionMatrix();
     }
-  }, [cameraMode]);
+  }, [cameraMode, gridW, gridH]);
 
   useEffect(() => {
     return () => {
