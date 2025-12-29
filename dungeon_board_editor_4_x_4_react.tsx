@@ -19,6 +19,7 @@ const DEFAULT_TEX = {
   pit: "Texture/pit.png",
   wall: "Texture/muro.png",
   door: "Texture/legno.png",
+  raised: "Texture/floor.png",
 } as const;
 
 type CellType = "floor" | "pit" | "water" | "raised";
@@ -132,6 +133,7 @@ function DungeonBoardEditorTrue3D() {
   const [texFloorUrl, setTexFloorUrl] = useState<string | null>(DEFAULT_TEX.floor);
   const [texWaterUrl, setTexWaterUrl] = useState<string | null>(DEFAULT_TEX.water);
   const [texPitUrl, setTexPitUrl] = useState<string | null>(DEFAULT_TEX.pit);
+  const [texRaisedUrl, setTexRaisedUrl] = useState<string | null>(DEFAULT_TEX.raised);
   const [texWallUrl, setTexWallUrl] = useState<string | null>(DEFAULT_TEX.wall);
   const [texDoorUrl, setTexDoorUrl] = useState<string | null>(DEFAULT_TEX.door);
   const [texRepeat, setTexRepeat] = useState(2);
@@ -328,6 +330,7 @@ function DungeonBoardEditorTrue3D() {
     const floorMap = getTexture(texFloorUrl);
     const waterMap = getTexture(texWaterUrl);
     const pitMap = getTexture(texPitUrl);
+    const raisedMap = getTexture(texRaisedUrl);
     const wallMap = getTexture(texWallUrl);
     const doorMap = getTexture(texDoorUrl);
 
@@ -367,6 +370,11 @@ function DungeonBoardEditorTrue3D() {
       floor: new THREE.MeshStandardMaterial(
         floorMap
           ? { color: 0xffffff, roughness: 0.95, metalness: 0.0, map: floorMap }
+          : { color: 0xffffff, roughness: 0.95, metalness: 0.0 }
+      ),
+      raised: new THREE.MeshStandardMaterial(
+        raisedMap
+          ? { color: 0xffffff, roughness: 0.95, metalness: 0.0, map: raisedMap }
           : { color: 0xffffff, roughness: 0.95, metalness: 0.0 }
       ),
       water: makeWaterMaterial(),
@@ -572,10 +580,7 @@ function DungeonBoardEditorTrue3D() {
         }
 
         if (type === "raised") {
-          const tileMat = floorMap ? cloneMatWithOffset(mats.floor, floorMap, x, y) : mats.floor.clone();
-          // Pavimento rialzato più scuro del 50% per differenziarlo
-          (tileMat as THREE.MeshStandardMaterial).color = ((tileMat as THREE.MeshStandardMaterial).color ?? new THREE.Color(0xffffff)).clone();
-          (tileMat as THREE.MeshStandardMaterial).color.multiplyScalar(0.5);
+          const tileMat = raisedMap ? cloneMatWithOffset(mats.raised, raisedMap, x, y) : mats.raised;
           const tile = new THREE.Mesh(geo.tile, tileMat);
           tile.position.set(cx, raisedTileCenter, cz);
           tile.castShadow = true;
@@ -897,7 +902,6 @@ const buildDoor = () => {
           for (let b = 0; b < blades; b++) {
             const blade = new THREE.Mesh(geo.grassBlade, mats.grass.clone());
             const col = new THREE.Color(obj.grassColor ?? grassColor);
-            (blade.material as THREE.MeshStandardMaterial).color.copy(col);
             (blade.material as THREE.MeshStandardMaterial).onBeforeCompile = (shader) => {
               shader.uniforms.time = waterUniformsRef.current.time;
               shader.vertexShader = shader.vertexShader.replace(
@@ -960,7 +964,7 @@ const buildDoor = () => {
     root.add(customRoot);
 
     return { root, pickPlane, hasTorch, hasLight, customRoot };
-  }, [board, halfH, halfW, gridW, gridH, torchColor, torchDecay, torchDistance, torchIntensity, texFloorUrl, texWaterUrl, texPitUrl, texWallUrl, texDoorUrl, texRepeat, waterOpacity, grassColor, grassDensity, grassDecay, customObjects, customTemplates]);
+  }, [board, halfH, halfW, gridW, gridH, torchColor, torchDecay, torchDistance, torchIntensity, texFloorUrl, texWaterUrl, texPitUrl, texRaisedUrl, texWallUrl, texDoorUrl, texRepeat, waterOpacity, grassColor, grassDensity, grassDecay, customObjects, customTemplates]);
 
   // Initialize renderer + scene once
   useEffect(() => {
@@ -1498,6 +1502,7 @@ const buildDoor = () => {
         texFloorUrl,
         texWaterUrl,
         texPitUrl,
+        texRaisedUrl,
         texWallUrl,
         texDoorUrl,
         grassColor,
@@ -1578,6 +1583,7 @@ const buildDoor = () => {
         setUrl(settings.texFloorUrl ?? data.texFloorUrl, texFloorUrl, setTexFloorUrl);
         setUrl(settings.texWaterUrl ?? data.texWaterUrl, texWaterUrl, setTexWaterUrl);
         setUrl(settings.texPitUrl ?? data.texPitUrl, texPitUrl, setTexPitUrl);
+        setUrl(settings.texRaisedUrl ?? data.texRaisedUrl, texRaisedUrl, setTexRaisedUrl);
         setUrl(settings.texWallUrl ?? data.texWallUrl, texWallUrl, setTexWallUrl);
         setUrl(settings.texDoorUrl ?? data.texDoorUrl, texDoorUrl, setTexDoorUrl);
 
@@ -1744,6 +1750,19 @@ const buildDoor = () => {
                   Default
                 </button>
                 <button className="btn" onClick={() => clearUrl(texFloorUrl, setTexFloorUrl)}>
+                  Pulisci
+                </button>
+              </div>
+            </div>
+            <div className="stack">
+              <div className="section-title">Piano rialzato (PNG/JPG)</div>
+              <div className="small break-all">{texRaisedUrl ?? "-"}</div>
+              <div className="flex gap-6">
+                <input type="file" accept="image/*" onChange={setFromFile(setTexRaisedUrl)} />
+                <button className="btn" onClick={() => setDefaultTexture(DEFAULT_TEX.raised, texRaisedUrl, setTexRaisedUrl)}>
+                  Default
+                </button>
+                <button className="btn" onClick={() => clearUrl(texRaisedUrl, setTexRaisedUrl)}>
                   Pulisci
                 </button>
               </div>
@@ -2277,3 +2296,4 @@ if (_rootEl) {
   const _root = ReactDOM.createRoot(_rootEl);
   _root.render(React.createElement(DungeonBoardEditorTrue3D));
 }
+
